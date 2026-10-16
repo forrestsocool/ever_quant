@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f6f3">
+  <title>国家队异动雷达 · 宽基 ETF 资金监测</title>
+  <link rel="stylesheet" href="/static/style.css?v=20261016-2">
+  <script src="/static/app.js?v=20261016-2" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="rail" aria-label="主导航">
+    <a class="brand" href="#overview" title="国家队异动雷达" aria-label="国家队异动雷达首页"><svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="11"/><circle cx="16" cy="16" r="6"/><path d="M16 2v14l9 9M2 16h5M25 16h5M16 25v5"/><circle class="radar-dot" cx="10.5" cy="12" r="2"/></svg></a>
+    <div class="rail-divider"></div>
+    <nav>
+      <a class="nav-item active" href="#overview" aria-label="资金概览" title="资金概览"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>概览</span></a>
+      <a class="nav-item" href="#watchlist" aria-label="ETF 观察池" title="ETF 观察池"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 3 8-10M15 5h5v5M3 21h18"/></svg><span>观察池</span></a>
+      <a class="nav-item" href="#history" aria-label="历史异动" title="历史异动"><svg viewBox="0 0 24 24"><path d="M4.7 6.5A9 9 0 1 1 3 13M3 4v5h5M12 7v5l3 2"/></svg><span>异动</span></a>
+      <a class="nav-item" href="#method" aria-label="指标说明" title="指标说明"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.1"/></svg><span>说明</span></a>
+    </nav>
+    <button class="nav-item rail-settings" id="railSettings" title="监测参数" aria-label="打开监测参数"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>设置</span></button>
+    <span class="rail-mark">CN</span>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="breadcrumb"><span>市场观察</span><span class="slash">/</span><strong>A 股资金雷达</strong></div>
+      <div class="topbar-right"><span class="source-pill"><span class="connection-dot" id="connectionDot"></span><span id="connectionLabel">本地数据终端</span></span><span class="timezone">北京时间</span><button class="icon-button" id="topSettings" title="监测参数" aria-label="打开监测参数"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg></button></div>
+    </header>
+
+    <main id="main">
+      <section id="overview" class="overview-section">
+        <div class="page-heading">
+          <div><h1>国家队异动<span>雷达</span><span class="title-badge">A 股</span></h1><p class="page-description">宽基 ETF 份额与大额资金需求监测</p></div>
+          <div class="heading-stamp"><span id="asOfLabel">主视图交易日</span><strong id="asOf">—</strong><small id="updatedAt">等待载入真实数据</small></div>
+        </div>
+
+        <div class="view-toolbar">
+          <div class="view-mode-tabs" id="viewModeControls" aria-label="选择数据视图"><button data-view="complete" class="active" aria-pressed="true">最近完整日</button><button data-view="latest" aria-pressed="false">最新披露</button><button data-view="custom" aria-pressed="false" aria-expanded="false">自选日期</button></div>
+          <div class="latest-progress" id="latestProgress" aria-live="polite"><span class="mini-dot"></span><span>正在读取最新披露进度</span></div>
+        </div>
+        <div class="toolbar">
+          <div class="view-context" id="viewContext" aria-live="polite">正在读取最近完整交易日…</div>
+          <div class="toolbar-actions"><a class="button button-outline" id="exportButton" href="/api/export.csv" download aria-disabled="true"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 16v5h16v-5"/></svg><span>导出当前视图</span></a><button class="button button-primary" id="refreshButton" title="更新最新数据，保留当前选定的历史视图"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11.8-1L20 9M4 15l2.2 3A7 7 0 0 0 18 17"/></svg><span>更新真实数据</span></button></div>
+        </div>
+        <div class="custom-date-editor" id="customDateEditor" hidden><div class="date-controls"><span class="toolbar-label">观察区间</span><label class="sr-only" for="startDate">开始日期</label><input id="startDate" type="date" aria-label="开始日期"><span class="date-separator">—</span><label class="sr-only" for="endDate">结束日期</label><input id="endDate" type="date" aria-label="结束日期"><button class="button button-subtle" id="dateApply">应用区间</button></div><span id="dateDraftNote">点击应用后切换；图表与导出以已展示区间为准。</span></div>
+
+        <div class="notice" id="notice" role="status" hidden><div class="notice-symbol" id="noticeSymbol">i</div><span id="noticeText"></span><button id="noticeClose" aria-label="关闭提示">×</button></div>
+        <div class="refresh-progress" id="refreshProgress" hidden><span class="spinner"></span><span id="refreshStage">正在更新数据…</span><span class="progress-detail">保留当前视图</span></div>
+
+        <div class="overview-grid">
+          <article class="hero-card">
+            <div class="hero-top"><span class="card-eyebrow" id="heroDateLabel">重点宽基组合</span><span class="unit-pill">7 只核心 ETF</span></div>
+            <div class="hero-label">估算净申赎资金 <button class="help-dot" title="各 ETF 的（当日总份额 − 上一交易日总份额）× 前一交易日单位净值，加总后换算为亿元。" aria-label="估算净申赎计算说明">?</button></div>
+            <div class="hero-value-row"><strong class="hero-value numeric" id="heroFlow">—</strong><span class="hero-unit">亿元</span><span class="flow-tag" id="heroDirection">等待数据</span></div>
+            <div class="hero-bottom"><div class="coverage-line"><span class="mini-dot"></span><span id="coverageText">观察池数据尚未载入</span></div><span class="hero-note">份额 × 前日净值</span></div>
+            <svg class="hero-art" viewBox="0 0 240 140" fill="none" aria-hidden="true"><circle cx="175" cy="108" r="94"/><circle cx="175" cy="108" r="68"/><circle cx="175" cy="108" r="42"/><path d="M175 0v140M70 108h170M175 108l60-60"/><circle cx="207" cy="76" r="4"/></svg>
+          </article>
+          <article class="signal-card" id="signalCard">
+            <div class="signal-top"><span class="card-eyebrow">多信号交叉观察</span><span class="signal-pulse"></span></div>
+            <div class="signal-heading"><div class="signal-icon" id="signalIcon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg></div><h2 id="signalTitle">等待监测数据</h2><span class="signal-badge" id="signalBadge">未评估</span></div>
+            <p id="signalDescription">载入 ETF 份额与净值后，综合资金规模、历史异常程度和多基金同步性评估异动。</p>
+            <div class="signal-checks" id="signalChecks"><span><i></i>资金规模</span><span><i></i>历史异常</span><span><i></i>跨 ETF 同步</span></div>
+            <div class="attribution-note"><svg viewBox="0 0 24 24"><path d="M12 3L2 21h20L12 3zM12 9v5M12 17v.1"/></svg><span>估算净申赎不代表国家队交易额</span></div>
+          </article>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card"><div class="metric-label">资金异常度 <span class="metric-label-en">Z-SCORE</span></div><div class="metric-value-row"><strong class="numeric" id="zScore">—</strong><span class="metric-chip" id="zChip">滚动基准</span></div><div class="metric-caption" id="zCaption">历史样本不足时不计算</div><div class="metric-accent"></div></article>
+          <article class="metric-card"><div class="metric-label">同步净申购 <span class="metric-label-en">BREADTH</span></div><div class="metric-value-row"><strong class="numeric" id="syncCount">—</strong><span class="metric-unit">只 ETF</span><span class="breadth-dots" id="breadthDots"></span></div><div class="metric-caption" id="syncCaption">观察跨基金的同向资金需求</div><div class="metric-accent"></div></article>
+          <article class="metric-card"><div class="metric-label">近 5 日累计 <span class="metric-label-en">5D FLOW</span></div><div class="metric-value-row"><strong class="numeric" id="flow5d">—</strong><span class="metric-unit">亿元</span><span class="metric-spark" id="spark5d"></span></div><div class="metric-caption">基于有效交易日的估算净申赎</div><div class="metric-accent"></div></article>
+          <article class="metric-card"><div class="metric-label">近 20 日累计 <span class="metric-label-en">20D FLOW</span></div><div class="metric-value-row"><strong class="numeric" id="flow20d">—</strong><span class="metric-unit">亿元</span><span class="metric-spark" id="spark20d"></span></div><div class="metric-caption" id="flow20Caption">持续性比单日波动更值得关注</div><div class="metric-accent"></div></article>
+        </div>
+
+        <section class="panel flow-panel" aria-labelledby="flowChartTitle">
+          <div class="panel-heading"><div><h2 id="flowChartTitle">宽基资金脉搏 <span class="section-count" id="chartDays">日频</span></h2><p>份额变动识别资金需求，历史基准衡量异常程度</p></div><div class="segmented-control" id="rangeControls" aria-label="图表显示交易日"><button data-range="20">20 日</button><button data-range="60" class="active" aria-pressed="true">60 日</button><button data-range="120">120 日</button><button data-range="all">全部</button></div></div>
+          <div class="chart-meta"><div class="chart-legend"><span><i class="legend-bar positive"></i>净申购</span><span><i class="legend-bar negative"></i>净赎回</span><span><i class="legend-line"></i>Z 异常度</span><span class="threshold-legend"><i class="legend-dashed"></i>异动阈值</span></div><button type="button" class="index-toggle" id="indexToggle" aria-pressed="true" aria-label="显示沪深300指数曲线"><i class="legend-index"></i><span>沪深300指数</span><span class="index-toggle-state" id="indexToggleState">显示中</span></button></div>
+          <div class="chart-container" id="mainChart" aria-label="每日估算净申赎、沪深300指数及 Z 异常度图表"><div class="chart-empty"><div class="empty-orbit"></div><strong>等待真实资金数据</strong><p>点击「更新真实数据」开始监测观察池</p></div></div>
+          <div class="chart-foot"><span id="chartFootText"><i class="foot-dot"></i>左轴为估算净申赎（亿元），右轴为沪深300（点）；底部为 Z 异常度。缺失值留空。</span><button class="text-button" id="chartSettings">调整监测参数 <span>↗</span></button></div>
+        </section>
+      </section>
+
+      <section class="panel watchlist-panel" id="watchlist" aria-labelledby="watchlistTitle">
+        <div class="panel-heading"><div><h2 id="watchlistTitle">重点 ETF 观察池 <span class="section-count" id="watchlistCount">—</span></h2><p>跟踪核心宽基基金的份额变化与申赎共振</p></div><div class="table-controls"><label class="search-box"><svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="M15 15l5 5"/></svg><input type="search" id="etfSearch" placeholder="搜索代码 / 基金名称" aria-label="搜索 ETF"></label><select id="indexFilter" aria-label="按跟踪指数筛选"><option value="all">全部指数</option></select></div></div>
+        <div class="table-scroll"><table class="etf-table"><thead><tr><th><button data-sort="name" class="sort-button">基金 / 跟踪指数 <span></span></button></th><th class="align-right"><button data-sort="total_share_yi" class="sort-button">总份额 <small>亿份</small><span></span></button></th><th class="align-right"><button data-sort="delta_share_yi" class="sort-button">份额变化 <small>亿份</small><span></span></button></th><th class="align-right"><button data-sort="flow_yi" class="sort-button active">估算净申赎 <small>亿元</small><span>↓</span></button></th><th class="align-right"><button data-sort="z_score" class="sort-button">异常度 Z <span></span></button></th><th>近 20 日资金</th><th><button data-sort="status" class="sort-button">监测信号 <span></span></button></th><th class="table-chevron"></th></tr></thead><tbody id="etfTableBody"><tr><td colspan="8"><div class="table-empty">尚未载入 ETF 数据</div></td></tr></tbody></table></div>
+        <div class="table-footer"><span id="tableFooterText">点击基金行可展开历史份额与资金详情</span><span class="table-disclaimer">红色净申购 · 青色净赎回</span></div>
+      </section>
+
+      <div class="lower-grid">
+        <section class="panel history-panel" id="history" aria-labelledby="historyTitle"><div class="panel-heading"><div><h2 id="historyTitle">历史信号记录 <span class="section-count" id="alertCount">—</span></h2><p>区分全部达标的异动与多基金同步观察</p></div><button class="text-button" id="showAllAlerts" hidden>查看全部 <span>↗</span></button></div><div id="alertsList" class="alerts-list"><div class="small-empty">当前没有可展示的异动记录</div></div><div class="history-foot">异动代表资金需求异常，归属需要独立证据。</div></section>
+        <section class="panel evidence-panel" aria-labelledby="evidenceTitle"><div class="panel-heading"><div><h2 id="evidenceTitle">独立证据与数据质量</h2><p>用公开披露验证资金信号</p></div><span class="outline-badge">交叉验证</span></div><div class="evidence-status" id="evidenceStatus"><span class="evidence-icon"><svg viewBox="0 0 24 24"><path d="M5 3h11l4 4v14H5zM15 3v5h5M9 12h7M9 16h5"/></svg></span><div><strong>资金信号不能识别买方身份</strong><p>结合中央汇金等官方披露与基金定期报告判断。</p></div></div><div class="evidence-list" id="evidenceList"></div><details class="quality-details" id="qualityDetails"><summary><span><span class="quality-indicator" id="qualityIndicator"></span>数据完整性检查</span><span class="quality-summary" id="qualitySummary">等待数据</span></summary><div id="qualityContent" class="quality-content">尚未载入数据质量信息。</div></details></section>
+      </div>
+
+      <section class="method-section" id="method"><details><summary><div class="method-heading"><span class="method-symbol">ƒ</span><div><h2>我们如何识别异动</h2><p>透明的方法，可解释的信号</p></div></div><span class="method-toggle">计算方法与使用边界 <span>＋</span></span></summary><div class="method-content"><div class="formula-box"><span class="formula-label">组合估算净申赎</span><div class="formula">F<sub>t</sub> = Σ (Q<sub>i,t</sub> − Q<sub>i,t−1</sub>) × NAV<sub>i,t−1</sub></div><p>Q 为清算后的基金总份额，NAV 为前一交易日单位净值。按统一单位计算后换算为亿元。</p></div><div class="method-steps"><article><span>01</span><div><h3>份额变化定位真实申赎</h3><p>二级市场买卖只是份额转手。总份额增加反映净申购，也可能源于大额买盘带动的套利申购。</p></div></article><article><span>02</span><div><h3>规模、异常度、同步性共同观察</h3><p id="methodThresholds">对照历史滚动均值与标准差，结合资金规模及多只 ETF 同向变化识别资金异动。历史不足或标准差为零时，Z 值显示为「—」。</p></div></article><article><span>03</span><div><h3>独立披露验证归属</h3><p>宽基净申购不等于国家队买入，净赎回也不能证明国家队卖出。官方公告和定期持仓披露用于验证。</p></div></article></div><div class="method-source" id="methodSource">数据来源：本地 Tushare 认证 · 交易日收盘后披露数据</div></div></details></section>
+
+      <footer class="page-footer"><div><span class="footer-brand">RADAR<span> / </span>国家队异动雷达</span><span class="footer-dot">·</span><span>以份额为线索，以证据为依据</span></div><span>本地运行 · 研究观察工具</span></footer>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+  <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden><div class="drawer-top"><span class="eyebrow">ETF DETAIL</span><button class="icon-button" id="drawerClose" aria-label="关闭 ETF 详情">×</button></div><div id="drawerContent"></div></aside>
+
+  <dialog class="settings-dialog" id="settingsDialog"><form id="settingsForm"><div class="dialog-header"><div><span class="eyebrow">MONITOR SETTINGS</span><h2>监测参数</h2></div><button type="button" class="icon-button" id="settingsClose" aria-label="关闭参数设置">×</button></div><p class="dialog-description">参数用于本地重新计算信号；修改后不会触发数据下载。</p><label class="form-field"><span>历史基准窗口 <small>交易日</small></span><select id="settingWindow"><option value="20">20 日</option><option value="40">40 日</option><option value="60">60 日</option><option value="120">120 日</option></select><small>使用此前连续交易日完整样本计算 Z-Score；设置随网址保存。</small></label><label class="form-field"><span>异常度阈值 <small>|Z|</small></span><input type="number" id="settingZ" min="0.5" max="10" step="0.1" required><small>正向、负向异常使用同一绝对值阈值。</small></label><label class="form-field"><span>净申赎金额门槛 <small>亿元</small></span><input type="number" id="settingFlow" min="0.1" max="10000" step="0.1" required></label><label class="form-field"><span>同向 ETF 数量门槛 <small>只</small></span><input type="number" id="settingSync" min="1" max="7" step="1" required></label><div class="dialog-note">有效数据不足时保留缺失值，不以 0 替代未知。信号仅提示异动，不能确认交易主体。</div><div class="dialog-actions"><button class="button button-outline" id="settingsReset" type="button">恢复默认</button><button class="button button-primary" type="submit">应用参数</button></div></form></dialog>
+  <div class="chart-tooltip" id="chartTooltip" role="status" hidden></div>
+</body>
+</html>

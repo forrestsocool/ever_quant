@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.idea/
+.vscode/
+.env
+*.log
+
+# Local data cache
+national_team_radar/data/
+*.csv.bak
