@@ -399,6 +399,7 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="国家队异动雷达：本地 Tushare 份额监测")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址，云服务器可设置为 0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
@@ -416,7 +417,7 @@ def main() -> None:
         print(json.dumps({"as_of": snapshot.get("as_of"), "summary": snapshot.get("summary"), "snapshot": str(DATA / "snapshot.json"), "alerts": str(DATA / "alerts.csv")}, ensure_ascii=False))
         return
     import uvicorn
-    uvicorn.run(create_app(store, auto_update=not args.no_auto_update), host="127.0.0.1", port=args.port, access_log=False)
+    uvicorn.run(create_app(store, auto_update=not args.no_auto_update), host=args.host, port=args.port, access_log=False)
 
 
 if __name__ == "__main__":
