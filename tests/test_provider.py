@@ -63,6 +63,7 @@ class ProviderTests(unittest.TestCase):
             patch.object(provider, "_client", return_value=(self.client, "secret-test-token-should-not-leak", "test")),
             patch.object(provider, "ETF_UNIVERSE", [provider.ETF_UNIVERSE[0]]),
             patch.object(provider.time, "sleep"),
+            patch.object(provider, "ENABLE_WEB_FALLBACK", False),
         ]
         for item in self.patches:
             item.start()
@@ -240,6 +241,18 @@ class ProviderTests(unittest.TestCase):
         ])
         with self.assertRaisesRegex(provider.DataProviderError, "同日记录存在冲突"):
             provider._dated(frame)
+
+    def test_web_fallback_when_benchmark_fails(self):
+        mock_bench = pd.DataFrame([
+            {"trade_date": "2026-10-14", "close": 4217.0, "pct_chg": -1.35, "ts_code": "000300.SH"}
+        ])
+        with patch.object(provider, "ENABLE_WEB_FALLBACK", True), \
+             patch.object(self.client, "index_daily", side_effect=RuntimeError("index source down")), \
+             patch.object(provider, "_web_fetch_benchmark", return_value=mock_bench):
+            result = provider.fetch_market_data("20261013", "20261015", force=True)
+            self.assertEqual(result["metadata"]["auxiliary"]["benchmark"]["mode"], "live_web")
+            self.assertEqual(len(result["metadata"]["benchmark"]), 1)
+
 
 
 if __name__ == "__main__":

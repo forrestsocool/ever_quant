@@ -28,7 +28,7 @@ python -m pytest tests -q
 
 ## 数据与认证
 
-默认复用项目内 `tushare/sxsc_tushare` 客户端和已有本地认证；从旧策略脚本解析认证字面值时不会执行策略。也可通过 `SXSC_TUSHARE_TOKEN` 提供本地代理认证。认证只存在于服务端内存，不写入新源码、网页或快照。
+系统全部使用真实市场数据。默认复用 Tushare 认证（支持 `TUSHARE_TOKEN`、`SXSC_TUSHARE_TOKEN` 或本地 `~/jsdata_tk.csv`）。当 Tushare 接口受限、积分不足或网络异常获取不到数据时，系统具备**自动互联网开源数据备用补全机制**（自动从新浪财经、天天基金网、东方财富、AkShare 等公开权威数据源补充指数收盘曲线、ETF净值、日线行情与交易日历），确保真实数据的高可用与持续更新。认证仅存在于服务端内存，绝不泄露到前端或代码中。
 
 真实接口优先尝试 `etf_share_size`；当前本地代理未提供时，回退到 `fund_share`、`fund_nav` 和 `fund_daily`，交易日使用 `trade_cal`。不以收盘价冒充基金净值，不对缺失份额向前填充，不用 ETF 规模涨跌代替申购。
 
@@ -75,9 +75,32 @@ python E:\Project\ever_quant\run_radar_mcp.py
 }
 ```
 
-推荐 AI 先调用 `get_market_timing_brief`，读取 `decision_state`、`entry_support`、`exit_pressure`、逐项阈值检查和 `blocking_reasons`；再用 `get_radar_overview` 核对最新披露与最近完整日，用 `get_daily_series` 对照同日沪深300，用 `get_etf_detail` 追溯贡献来源，用 `get_data_quality` 查看缺失、来源时间和刷新状态。`get_historical_events` 提供预警、同步观察与人工证据，`get_methodology` 和 `list_etf_universe` 说明口径与观察池。对应的 `radar://` 资源适合不带参数的快速读取；历史序列接口每次最多返回120行，支持 `offset` 分页。
+### 核心决策接口（突出重点，驱动 AI 择时投机与获利了结）
 
-`support_watch` 和 `exit_watch` 仅表示完整、最新、同向 ETF 数量及金额/Z 阈值同时成立的观察条件；`insufficient_data` 表示时效或覆盖条件不满足。净申购和净赎回均是日频、滞后披露的估算。MCP 无个人持仓、成本或交易限制，无法判断实际盈利，也不能据此确认国家队身份或保证择时收益。人工证据明确标注且不参与自动评分。
+1. **一站式高光速览：`get_fund_pulse_snapshot`**
+   - 突出重点，一键返回最新资金脉搏定性（极强托底/大额净流入/均衡/大额赎回预警）、沪深300收盘与涨跌幅、量价背离警示、以及为下游 AI 提炼的最高优先级一句话操作建议。
+
+2. **择时投机决策：`get_speculation_signals(end_date=None, risk_preference='balanced')`**
+   - 产出 **0-100 分量化投机评分** 与 **明确操作指令**（`STRONG_SPECULATIVE_BUY` 强烈做多 / `SPECULATIVE_BUY` 逢低试探 / `ACCUMULATE` 温和吸筹 / `AVOID` 规避）。
+   - **量价底背离检测**：精准识别“沪深300指数下跌但宽基遭遇大额逆势资金净流入”的典型国家队/机构托底抄底信号。
+   - **执行策略**：提供建议建仓仓位比例（如 50% 积极仓位）、优选目标 ETF 榜单（按净申购量与单基 Z 值排序）、沪深300参考支撑位、第一/第二止盈目标线及止损保护点位。
+
+3. **获利了结与防守：`get_profit_taking_signals(end_date=None, holding_return_pct=None, cost_benchmark_level=None)`**
+   - 产出 **0-100 分出局紧迫度评分** 与 **明确出局指令**（`STRONG_TAKE_PROFIT` 果断止盈 / `PARTIAL_TAKE_PROFIT` 分批减仓 / `TRAILING_STOP` 移动止盈 / `HOLD_SAFE` 安心持有）。
+   - **量价顶背离检测**：捕捉“指数冲高上涨但宽基资金大额撤退减持”的逢高派发风险。
+   - **执行策略**：建议减仓比例（如减仓 50%）、移动止盈保护规则、以及赎回压力最大的高危 ETF 明细。
+
+4. **宏观协同分析：`get_csi300_correlation_analysis(limit=60)`**
+   - 计算历史区间宽基资金流与沪深300指数的滚动相关系数，统计历史底背离与顶背离发生次数及后续行情特征。
+
+### 辅助穿透工具与资源
+- `get_market_timing_brief`：阈值硬性匹配与阻断原因核验。
+- `get_radar_overview`：核对最新披露、完整日与预警列表。
+- `get_daily_series`：历史日序列与同日沪深300指数（支持 limit/offset 分页）。
+- `get_etf_detail`：逐只 ETF 深度穿透历史数据与贡献来源。
+- `get_data_quality` & `get_methodology`：数据质量与计算口径说明。
+- **资源 (`radar://`)**：`radar://pulse`（脉搏快照）、`radar://speculation`（投机信号）、`radar://profit-taking`（了结信号）、`radar://overview`、`radar://timing`、`radar://universe` 等。
+- **内置 Prompt 模板**：`timing_speculation_strategy`（择时投机分析报告模板）、`profit_taking_strategy`（获利了结与风控报告模板）。
 
 ## 交叉验证
 

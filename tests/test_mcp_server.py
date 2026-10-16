@@ -219,6 +219,58 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 after = (await client.call_tool("get_radar_overview", {})).structured_content
                 self.assertEqual(after["last_complete"]["flow_yi"], -60)
 
+    async def test_speculation_signals_and_profit_taking_signals(self):
+        inflow_snap = fixture_snapshot(flow=150.0, z=4.0, sync_in=3, sync_out=0)
+        async with Client(create_mcp_server(FakeStore(inflow_snap))) as client:
+            tools = await client.list_tools()
+            names = {tool.name for tool in tools.tools}
+            self.assertTrue({"get_speculation_signals", "get_profit_taking_signals",
+                             "get_fund_pulse_snapshot", "get_csi300_correlation_analysis"} <= names)
+
+            # Test speculation signals on strong inflow
+            spec = await client.call_tool("get_speculation_signals", {"risk_preference": "aggressive"})
+            self.assertFalse(spec.is_error)
+            spec_data = spec.structured_content
+            self.assertEqual(spec_data["speculation_action"], "STRONG_SPECULATIVE_BUY")
+            self.assertGreaterEqual(spec_data["speculation_score"], 80)
+            self.assertIn("建议", spec_data["execution_guide"]["suggested_position"])
+            self.assertTrue(len(spec_data["execution_guide"]["top_target_etfs"]) > 0)
+
+            # Test fund pulse snapshot
+            pulse = await client.call_tool("get_fund_pulse_snapshot", {})
+            self.assertFalse(pulse.is_error)
+            pulse_data = pulse.structured_content
+            self.assertIn("极强资金托底", pulse_data["pulse_verdict"])
+            self.assertIn("核心建议", pulse_data["key_recommendation"])
+
+            # Test correlation analysis
+            corr = await client.call_tool("get_csi300_correlation_analysis", {"limit": 30})
+            self.assertFalse(corr.is_error)
+            self.assertIn("sample_sessions", corr.structured_content)
+
+            # Test resources
+            pulse_res = await client.read_resource("radar://pulse")
+            self.assertIn("pulse_verdict", pulse_res.contents[0].text)
+            spec_res = await client.read_resource("radar://speculation")
+            self.assertIn("speculation_action", spec_res.contents[0].text)
+            exit_res = await client.read_resource("radar://profit-taking")
+            self.assertIn("profit_taking_action", exit_res.contents[0].text)
+
+            # Test prompts
+            prompts = await client.list_prompts()
+            prompt_names = {p.name for p in prompts.prompts}
+            self.assertTrue({"timing_speculation_strategy", "profit_taking_strategy"} <= prompt_names)
+
+        # Test redemption / profit taking signals
+        outflow_snap = fixture_snapshot(flow=-120.0, z=-3.5, sync_in=0, sync_out=3)
+        async with Client(create_mcp_server(FakeStore(outflow_snap))) as client:
+            exit_result = await client.call_tool("get_profit_taking_signals", {"holding_return_pct": 20.0})
+            self.assertFalse(exit_result.is_error)
+            exit_data = exit_result.structured_content
+            self.assertIn(exit_data["profit_taking_action"], ("STRONG_TAKE_PROFIT", "PARTIAL_TAKE_PROFIT"))
+            self.assertGreaterEqual(exit_data["exit_urgency_score"], 60)
+            self.assertGreater(exit_data["suggested_reduction_pct"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

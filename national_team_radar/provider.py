@@ -334,6 +334,93 @@ def _slice(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
     return frame.loc[frame["trade_date"].between(start, end)].copy()
 
 
+ENABLE_WEB_FALLBACK = True
+
+
+def _web_fetch_benchmark(start: str, end: str) -> pd.DataFrame:
+    """Fetch CSI 300 (000300.SH) index daily data from public web API as fallback."""
+    try:
+        import requests
+        headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        url = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=300"
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200 and r.json():
+            df = pd.DataFrame(r.json())
+            df["trade_date"] = df["day"]
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["pct_chg"] = df["close"].pct_change() * 100
+            df["ts_code"] = "000300.SH"
+            df["source"] = "sina_web_kline"
+            return _dated(_slice(df, start, end))
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _web_fetch_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch ETF daily quote from public web API as fallback."""
+    try:
+        import requests
+        code, market = symbol.split(".")
+        prefix = "sh" if market.upper() == "SH" else "sz"
+        headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=no&datalen=300"
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200 and r.json():
+            df = pd.DataFrame(r.json())
+            df["trade_date"] = df["day"]
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            df["amount"] = pd.to_numeric(df["volume"], errors="coerce") / 1000.0
+            df["pct_chg"] = df["close"].pct_change() * 100
+            df["ts_code"] = symbol
+            return _dated(_slice(df, start, end))
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _web_fetch_etf_nav(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch ETF NAV history from Tiantian Jijin public web API as fallback."""
+    try:
+        import requests
+        code = symbol.split(".")[0]
+        headers = {"Referer": "http://fund.eastmoney.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        url = f"http://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=120"
+        r = requests.get(url, headers=headers, timeout=6)
+        if r.status_code == 200:
+            rows = r.json().get("Data", {}).get("LSJZList", [])
+            if rows:
+                df = pd.DataFrame(rows)
+                df["trade_date"] = df["FSRQ"]
+                df["nav"] = pd.to_numeric(df["DWJZ"], errors="coerce")
+                df["nav_ann_date"] = df["FSRQ"]
+                df["ts_code"] = symbol
+                return _dated(_slice(df, start, end), "trade_date")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _web_fetch_calendar(start: str, end: str) -> pd.DataFrame:
+    """Fetch trading calendar from Sina/Akshare public API as fallback."""
+    try:
+        import akshare as ak
+        cal = ak.tool_trade_date_hist_sina()
+        cal["trade_date"] = pd.to_datetime(cal["trade_date"].astype(str)).dt.strftime("%Y-%m-%d")
+        all_dates = pd.date_range(start, end).strftime("%Y-%m-%d").tolist()
+        open_set = set(cal["trade_date"])
+        open_list = sorted([d for d in open_set if d <= end])
+        prev_map = {open_list[i]: open_list[i - 1] if i > 0 else open_list[0] for i in range(len(open_list))}
+        rows = []
+        for d in all_dates:
+            is_open = 1 if d in open_set else 0
+            rows.append({"trade_date": d, "is_open": is_open, "pretrade_date": prev_map.get(d, "") if is_open else ""})
+        return pd.DataFrame(rows)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
 def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
             prefer_combined: bool) -> tuple[pd.DataFrame, list[str], list[str]]:
     errors: list[str] = []
@@ -363,11 +450,27 @@ def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
             nav = nav.rename(columns={"unit_nav": "nav", "ann_date": "nav_ann_date"})
         except DataProviderError as exc:
             errors.append(str(exc))
+        if nav.empty and ENABLE_WEB_FALLBACK:
+            try:
+                web_nav = _web_fetch_etf_nav(symbol, start, end)
+                if not web_nav.empty:
+                    nav = web_nav
+                    warnings.append(f"{symbol} 基金净值使用互联网开源接口备用补全。")
+            except Exception:
+                pass
     daily = pd.DataFrame()
     try:
         daily = _dated(_fetch_range(client, "fund_daily", start, end, token, ts_code=symbol))
     except DataProviderError as exc:
         errors.append(str(exc))
+    if daily.empty and ENABLE_WEB_FALLBACK:
+        try:
+            web_daily = _web_fetch_etf_daily(symbol, start, end)
+            if not web_daily.empty:
+                daily = web_daily
+                warnings.append(f"{symbol} 日线行情使用互联网开源接口备用补全。")
+        except Exception:
+            pass
     if not nav.empty:
         shares = shares.drop(columns=["nav"], errors="ignore")
     frames = []
@@ -577,6 +680,44 @@ def fetch_market_data(start_date: str, end_date: str, force: bool = False) -> di
                 return frame
             except DataProviderError as exc:
                 meta["warnings"].append(str(exc))
+                if ENABLE_WEB_FALLBACK:
+                    web_frame = pd.DataFrame()
+                    if key == "benchmark":
+                        web_frame = _web_fetch_benchmark(start, end)
+                    elif key == "calendar":
+                        web_frame = _web_fetch_calendar(start, end)
+                    if not web_frame.empty:
+                        try:
+                            if key == "calendar":
+                                _calendar_sessions(web_frame, start, end, full=True)
+                            combined = _replace_range(old, web_frame, start, end)
+                            _write_cache(key, combined, _manifest(old_meta, start, end, fetched_at,
+                                calendar_full=key == "calendar"))
+                            meta["cache_info"][key] = "live_web"
+                            meta["auxiliary"][key] = {"mode": "live_web", "fetched_at": fetched_at}
+                            meta["warnings"].append(f"{key} 从互联网开源数据备用获取成功。")
+                            return web_frame
+                        except Exception:
+                            pass
+        elif ENABLE_WEB_FALLBACK:
+            web_frame = pd.DataFrame()
+            if key == "benchmark":
+                web_frame = _web_fetch_benchmark(start, end)
+            elif key == "calendar":
+                web_frame = _web_fetch_calendar(start, end)
+            if not web_frame.empty:
+                try:
+                    if key == "calendar":
+                        _calendar_sessions(web_frame, start, end, full=True)
+                    combined = _replace_range(old, web_frame, start, end)
+                    _write_cache(key, combined, _manifest(old_meta, start, end, fetched_at,
+                        calendar_full=key == "calendar"))
+                    meta["cache_info"][key] = "live_web"
+                    meta["auxiliary"][key] = {"mode": "live_web", "fetched_at": fetched_at}
+                    meta["warnings"].append(f"{key} 从互联网开源数据备用获取成功。")
+                    return web_frame
+                except Exception:
+                    pass
         if not old.empty and (cache_valid or key == "benchmark"):
             meta["cache_info"][key] = "stale_cache"
             meta["auxiliary"][key] = {"mode": "stale_cache", "fetched_at": _range_updated_at(old_meta, start, end)}

@@ -13,12 +13,15 @@ EverQuant 是一个轻量级、面向实战的量化投资与市场流动性分�
 - **交互 Web 界面**：本地极速仪表盘（FastAPI + 原生轻量响应式前端）。
 
 ### 2. MCP (Model Context Protocol) 智能体分析服务 (`national_team_radar/mcp_server.py`)
-- 为 AI 客户端（如 Claude Desktop、Cursor、Codex 等）提供标准的 MCP 只读工具与资源：
-  - `get_market_timing_brief`：重点提炼入场支撑 (Support Watch)、获利了结/风险释放 (Exit Watch) 及数据分歧信号。
-  - `get_radar_overview`：获取最新资金流、沪深 300 点位、预警事件及完整性评级。
-  - `get_daily_series`：获取历史每日资金流与同日沪深 300 指数序列。
-  - `get_etf_detail`：逐只 ETF 深度穿透。
-  - `get_data_quality` & `get_methodology`：数据血统与质量核验。
+- 为 AI 客户端（如 Claude Desktop、Cursor、Codex 等）提供标准的 MCP 工具与资源：
+  - `get_fund_pulse_snapshot`：一站式全景快照，突出重点，一键返回最新资金脉搏定性、沪深300对比与核心决策摘要。
+  - `get_speculation_signals`：**专为 AI 择时投机打造**。输出 0-100 量化评分、操作建议（`STRONG_SPECULATIVE_BUY` 等）、具体建仓仓位建议、量价底背离托底检测、止损与止盈点位参考。
+  - `get_profit_taking_signals`：**专为 AI 获利了结打造**。评估赎回压力与顶背离风险，输出出局紧迫度评分、操作指令（`STRONG_TAKE_PROFIT` 等）、建议减仓比例与移动止盈保护规则。
+  - `get_csi300_correlation_analysis`：沪深300指数与资金脉搏协同分析（滚动相关系数、底背离与顶背离统计）。
+  - `get_market_timing_brief` & `get_radar_overview`：观察条件核验、最新披露与预警。
+  - `get_daily_series` & `get_etf_detail`：逐日历史流与单基穿透。
+  - `get_data_quality` & `get_methodology`：数据质量与计算方法论。
+  - **Prompt 模板**：`timing_speculation_strategy` 和 `profit_taking_strategy` 一键调用。
 
 ### 3. 多资产策略与回测框架
 - `backtest.py`：永久投资组合 (Permanent Portfolio) 回测（30年国债、黄金、沪深300、货币基金动态再平衡）。
