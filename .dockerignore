@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.git
+.github
+.pytest_cache/
+.idea/
+.vscode/
+.env
+*.log
+national_team_radar/data/
+tests/
+*.csv.bak

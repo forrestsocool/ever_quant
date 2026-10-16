@@ -1,0 +1,22 @@
+services:
+  radar:
+    image: ghcr.io/forrestsocool/ever_quant:latest
+    container_name: ever_quant_radar
+    restart: always
+    ports:
+      # 仅绑定本机 127.0.0.1，防止外部未授权访问，由 Nginx 反向代理
+      - "127.0.0.1:8765:8765"
+    environment:
+      - TZ=Asia/Shanghai
+      # Tushare Token: 可在此直接填写，或在同目录下创建 .env 文件注入
+      - TUSHARE_TOKEN=${TUSHARE_TOKEN}
+      - SXSC_TUSHARE_TOKEN=${SXSC_TUSHARE_TOKEN:-}
+    volumes:
+      # 宿主机挂载目录，确保历史数据缓存与每日快照持久化保存
+      - ./data:/app/national_team_radar/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8765/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

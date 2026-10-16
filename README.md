@@ -65,7 +65,18 @@ python run_radar.py
 python run_radar_mcp.py
 ```
 
-详见 [RADAR_README.md](RADAR_README.md)。
+### Docker 容器化与服务器部署
+
+本项目支持通过 GitHub Actions 自动构建云端镜像，并通过 Docker Compose 与 Nginx 部署于服务器（如 `/opt/ever_quant` 路径下）：
+
+```bash
+# 服务器拉取镜像并启动
+docker compose pull
+docker compose up -d
+```
+
+详细服务器部署、域名绑定与反向代理指引见 [DEPLOY.md](DEPLOY.md)。
+详见雷达与接口说明 [RADAR_README.md](RADAR_README.md)。
 
 ---
 
