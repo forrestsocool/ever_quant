@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install test dependencies
-        run: python -m pip install -r radar_requirements.txt pytest
+        run: python -m pip install -r radar_dev_requirements.txt
       - name: Verify financial logic, data sources and MCP
         run: python -m pytest tests -q
       - name: Verify dashboard behavior

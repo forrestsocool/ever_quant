@@ -23,6 +23,7 @@ python run_radar.py --start-date 2025-01-01 --end-date 2026-10-15
 python run_radar.py --port 8766 --no-auto-update
 
 # 单元测试
+python -m pip install -r radar_dev_requirements.txt
 python -m pytest tests -q
 ```
 
