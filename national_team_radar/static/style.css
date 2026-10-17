@@ -75,3 +75,7 @@ body{font-size:14px;line-height:1.7}.topbar{height:49px}.topbar,.breadcrumb,.bre
 .crosscheck-row time { color:#7c827b; }
 .crosscheck-row span { flex-basis:100%; overflow-wrap:anywhere; }
 .crosscheck-error { color:#9b6739!important; }
+.flow-panel .panel-heading{flex-wrap:wrap;align-items:flex-start}
+.flow-panel .panel-heading>div:first-child{min-width:0;flex:1 1 280px}
+.flow-panel .segmented-control{max-width:100%;flex-shrink:0;flex-wrap:wrap}
+#historySummary{line-height:1.7;color:var(--muted,#69716a)}

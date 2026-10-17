@@ -125,3 +125,19 @@ test("missing index series leaves the fund chart useful and marks the toggle una
   assert.equal(ui.get("indexToggleState").textContent, "暂无数据");
   assert.equal(ui.state.indexVisible, true);
 });
+
+test("full history is the default and dense daily bars do not overlap adjacent sessions", () => {
+  const ui = setup([]);
+  assert.equal(ui.readUrlState().range, "all");
+  ui.location.search = "?range=1260";
+  assert.equal(ui.readUrlState().range, "1260");
+  ui.state.snapshot.series = Array.from({ length: 3000 }, (_, i) => ({ date: new Date(Date.UTC(2016, 10, 4 + i)).toISOString().slice(0, 10), flow_yi: i % 2 ? -5 : 10, z_score: .5, valid_count: 7 }));
+  ui.state.snapshot.metadata.history = { common_listing_date: "2016-11-04", complete_days: 2990, trading_days: 3000, first_z_date: "2016-12-05" };
+  ui.renderMainChart();
+  const svg = ui.get("mainChart").innerHTML;
+  const widths = [...svg.matchAll(/class="bar [^"]+"[^>]*width="([^"]+)"/g)].map((match) => Number(match[1]));
+  assert.equal(widths.length, 3000);
+  assert.ok(widths.every((width) => width < .25));
+  assert.match(ui.get("historySummary").textContent, /2016-11-04/);
+  assert.match(ui.get("historySummary").textContent, /2990 \/ 3000/);
+});

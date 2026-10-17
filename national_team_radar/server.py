@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .engine import analyze
-from .provider import ETF_UNIVERSE, fetch_market_data
+from .provider import ETF_UNIVERSE, COMMON_LIST_DATE, EARLIEST_DATA_DATE, fetch_market_data
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -73,7 +73,7 @@ def atomic_json(path: Path, content: Any) -> None:
 
 
 def data_updated_at(metadata: dict) -> str | None:
-    """The whole snapshot is only as fresh as its oldest participating source."""
+    """Latest disclosures use the oldest live-source clock; history has its own clock."""
     timestamps = []
     for group in (metadata.get("symbols", {}), metadata.get("auxiliary", {})):
         for detail in group.values():
@@ -88,15 +88,15 @@ def data_updated_at(metadata: dict) -> str | None:
 def parse_dates(start: str | None, end: str | None) -> tuple[str, str]:
     try:
         finish = date.fromisoformat(end) if end else cn_now().date()
-        begin = date.fromisoformat(start) if start else finish - timedelta(days=365)
+        begin = date.fromisoformat(start) if start else date.fromisoformat(COMMON_LIST_DATE)
     except ValueError as exc:
         raise ValueError("日期应为 YYYY-MM-DD") from exc
     if begin > finish:
         raise ValueError("开始日期不能晚于结束日期")
     if finish > cn_now().date():
         raise ValueError("结束日期不能晚于北京时间今天")
-    if (finish - begin).days > 365 * 5 + 2:
-        raise ValueError("单次最多查询五年，可分段更新")
+    if begin.isoformat() < EARLIEST_DATA_DATE:
+        raise ValueError(f"历史查询起点不能早于现有基金的成立起点 {EARLIEST_DATA_DATE}")
     return begin.isoformat(), finish.isoformat()
 
 
@@ -179,7 +179,7 @@ class RadarStore:
                 raise ValueError("快照缺少数据来源信息")
             defaults = self.defaults
             if not self._explicit_range:
-                defaults = parse_dates(raw["metadata"].get("requested_start_date"), raw["metadata"].get("requested_end_date"))
+                defaults = parse_dates(None, None)
             updated_at = data_updated_at(raw["metadata"])
             self.data = raw
             self.defaults = defaults
@@ -194,6 +194,10 @@ class RadarStore:
             if self.state["running"]:
                 return False
             begin, finish = parse_dates(start if start is not None else self.defaults[0], end if end is not None else self.defaults[1])
+            if not self._explicit_range:
+                # A historical view must not shrink the persistent global pool.
+                begin = min(begin, COMMON_LIST_DATE)
+                finish = max(finish, cn_now().date().isoformat())
             self.state.update(running=True, stage="正在获取交易日历、ETF 份额、净值和行情…", error=None,
                               warning=None, last_attempt_at=cn_now().isoformat(timespec="seconds"))
         threading.Thread(target=self._fetch, args=(begin, finish, force), daemon=True, name="radar-refresh").start()
@@ -204,7 +208,7 @@ class RadarStore:
             # Fetch enough prior sessions for any allowed 120-session window,
             # including Chinese exchange holidays. The user's display range is
             # independent of the underlying calculation warmup.
-            warmup_start = (date.fromisoformat(begin) - timedelta(days=270)).isoformat()
+            warmup_start = max(EARLIEST_DATA_DATE, (date.fromisoformat(begin) - timedelta(days=270)).isoformat())
             fetched = fetch_market_data(warmup_start, finish, force=force)
             result = {**fetched, "observations": fetched["observations"].copy(),
                       "calendar": list(fetched["calendar"]), "metadata": deepcopy(fetched["metadata"])}
@@ -285,7 +289,7 @@ class RadarStore:
         metadata = deepcopy(data["metadata"])
         if not calendar:
             raise ValueError("交易日历不可用，不能确认相邻交易日；请重新更新。")
-        begin, finish = parse_dates(start or metadata.get("requested_start_date"), end or metadata.get("requested_end_date"))
+        begin, finish = parse_dates(start or (metadata.get("requested_start_date") if self._explicit_range else self.defaults[0]), end or (metadata.get("requested_end_date") if self._explicit_range else self.defaults[1]))
         # Retain pre-range data as warmup, then trim output. Indicators never use
         # observations after the selected end date, avoiding historical lookahead.
         frame = frame.loc[frame["trade_date"].astype(str) <= finish]
@@ -309,6 +313,18 @@ class RadarStore:
         metadata.update(view_start_date=begin, view_end_date=finish)
         metadata["navs_excluded_after_cutoff"] = masked_navs
         metadata["historical_data_policy"] = "按净值公告日期限制截止日可见性；来源历史修订及份额披露时刻未重建，不作严格历史时点回测"
+        visible_series = result.get("series", [])
+        complete_series = [row for row in visible_series if row.get("complete")]
+        z_series = [row for row in visible_series if row.get("z_score") is not None]
+        metadata["history"] = {"common_listing_date": COMMON_LIST_DATE,
+            "listing_dates": {item["ts_code"]: item.get("list_date") for item in ETF_UNIVERSE},
+            "listing_dates_source": "Tushare fund_basic；2026-10-17核实",
+            "requested_start": begin, "requested_end": finish,
+            "first_observation_date": visible_series[0]["date"] if visible_series else None,
+            "first_complete_date": complete_series[0]["date"] if complete_series else None,
+            "first_z_date": z_series[0]["date"] if z_series else None,
+            "trading_days": len(visible_series), "complete_days": len(complete_series),
+            "z_available_days": len(z_series), "warmup_policy": "上市前份额/净值仅作首日相邻数据锚点，不纳入该基金上市后的Z基准"}
         # Trim nested data as well as the top-level benchmark reference.
         metadata["benchmark"] = [x for x in metadata.get("benchmark", []) if begin <= x.get("trade_date", "") <= finish]
         benchmark = [x for x in metadata.get("benchmark", []) if x.get("trade_date", "") <= (result.get("as_of") or finish)]
@@ -352,7 +368,7 @@ class RadarStore:
             return False
         # A busy refresh does not consume the slot: catch up after it finishes,
         # including after resume from sleep. Preserve the user's history start.
-        started = self.refresh(start=self.defaults[0], end=now.date().isoformat())
+        started = self.refresh(start=self.defaults[0], end=now.date().isoformat(), force=False)
         if started:
             self._scheduled_slot = slot
         return started
@@ -417,7 +433,7 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
 
     @app.get("/api/config")
     def config():
-        return {**DEFAULTS, "start_date": store.defaults[0], "end_date": store.defaults[1], "today": cn_now().date().isoformat(), "universe": ETF_UNIVERSE}
+        return {**DEFAULTS, "start_date": store.defaults[0], "end_date": store.defaults[1], "history_start_date": COMMON_LIST_DATE, "today": cn_now().date().isoformat(), "universe": ETF_UNIVERSE}
 
     @app.get("/api/status")
     def status():

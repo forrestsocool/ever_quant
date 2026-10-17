@@ -4,7 +4,7 @@
   const $ = (id) => document.getElementById(id);
   const DEFAULTS = { window: 20, z_threshold: 2, min_flow_yi: 10, sync_min: 3 };
   const state = {
-    snapshot: null, config: {}, params: { ...DEFAULTS }, range: "60", indexVisible: true,
+    snapshot: null, config: {}, params: { ...DEFAULTS }, range: "all", indexVisible: true,
     search: "", index: "all", sort: "flow_yi", sortDirection: -1,
     refreshing: false, polling: null, requestId: 0, selectedEtf: null,
     drawerMode: "flow", alertsExpanded: false, loaded: false, previousFocus: null,
@@ -93,7 +93,7 @@
   }
 
   function latestParams(params = state.params) {
-    return { ...params, start_date: state.baseStart ?? state.config.start_date ?? params.start_date, end_date: latestEnd() };
+    return { ...params, start_date: state.config.history_start_date ?? state.baseStart ?? state.config.start_date ?? params.start_date, end_date: latestEnd() };
   }
 
   function readUrlState() {
@@ -106,7 +106,7 @@
     }
     for (const key of ["start_date", "end_date"]) if (dateString(query.get(key))) params[key] = dateString(query.get(key));
     const mode = ["complete", "latest", "custom"].includes(query.get("view")) ? query.get("view") : "complete";
-    const range = ["20", "60", "120", "all"].includes(query.get("range")) ? query.get("range") : "60";
+    const range = ["20", "60", "120", "252", "1260", "all"].includes(query.get("range")) ? query.get("range") : "all";
     return { params, mode, range, indexVisible: query.get("index") !== "off" };
   }
 
@@ -396,6 +396,8 @@
     let series = array(state.snapshot?.series);
     if (state.range !== "all") series = series.slice(-Number(state.range));
     $("chartDays").textContent = `${series.length} 个交易日`;
+    const history = state.snapshot?.metadata?.history;
+    if ($("historySummary") && history) $("historySummary").textContent = `共同上市起点 ${history.common_listing_date} · 当前区间 ${history.complete_days} / ${history.trading_days} 日资金数据完整 · Z基准就绪 ${history.first_z_date ?? "尚待完整样本"}`;
     const benchmark = new Map(array(state.snapshot?.metadata?.benchmark)
       .filter((row) => dateString(row.trade_date) && finite(row.close) && Number(row.close) > 0)
       .map((row) => [dateString(row.trade_date), row]));
@@ -453,7 +455,7 @@
     const zValues = series.map((row) => num(row.z_score)).filter((value) => value !== null);
     const zMax = niceMax(Math.max(state.params.z_threshold * 1.6, ...zValues.map(Math.abs), 3));
     const yZ = (value) => zTop + (zMax - value) / (zMax * 2) * zHeight;
-    const barWidth = Math.max(1.3, Math.min(18, step * .64));
+    const barWidth = Math.max(.05, Math.min(18, step * .64));
     const tickFlow = (value) => Math.abs(value) >= 1000 ? `${number(value / 1000, 1)}k` : number(value, Math.abs(value) < 5 ? 1 : 0).replace(/\.0$/, "");
     const tickIndex = (value) => number(value, indexMax - indexMin < 8 ? 1 : 0);
     const description = `每日估算净申赎（左轴亿元）${hasIndex ? "、沪深300指数（右轴点位）" : ""}及下方 Z 异常度，${series.length} 个交易日`;

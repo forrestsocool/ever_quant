@@ -241,3 +241,15 @@ test("a quiet update failure leaves an unapplied date draft intact", async () =>
   assert.equal(ui.state.dateDraftDirty, true);
   assert.equal(ui.get("endDate").value, "2026-10-13");
 });
+
+test("complete mode migrates old bookmarks to the common pool start while custom dates remain explicit", async () => {
+  const ui = harness(async () => fixture("2026-10-16"));
+  ui.state.config.history_start_date = "2016-11-04";
+  await ui.loadSnapshot({ mode: "complete" });
+  assert.match(ui.requests[0].url, /start_date=2016-11-04/);
+  assert.equal(ui.state.params.start_date, "2016-11-04");
+  const candidate = { ...ui.state.params, start_date: "2020-01-01", end_date: "2020-12-31" };
+  await ui.loadSnapshot({ mode: "custom", params: candidate });
+  assert.match(ui.requests.at(-1).url, /start_date=2020-01-01/);
+  assert.equal(ui.state.params.start_date, "2020-01-01");
+});

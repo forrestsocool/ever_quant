@@ -14,6 +14,7 @@ from datetime import date, datetime
 from statistics import mean, stdev
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
+from .universe import LISTING_DATES
 
 
 DEFAULT_UNIVERSE = [
@@ -35,6 +36,7 @@ DEFAULT_CONFIG = {
 }
 
 _QUALITY_TEXT = {
+    "pre_listing_session": "基金尚未上市，份额与净值仅作计算锚点，不参与资金信号或Z基准",
     "missing_current_observation": "缺少当日观测",
     "missing_current_share": "缺少当日有效份额",
     "missing_previous_session": "缺少上一交易日，不能跨日作差",
@@ -109,6 +111,7 @@ def _universe(universe: Any) -> list[dict[str, str]]:
             "ts_code": code,
             "name": str(item.get("name") or known.get("name") or code),
             "index": str(item.get("index") or item.get("benchmark") or known.get("index") or ""),
+            "list_date": _date(item.get("list_date") or known.get("list_date") or LISTING_DATES.get(code)),
         })
     if not result:
         raise ValueError("universe 不能为空")
@@ -263,6 +266,8 @@ def analyze(observations: Any, calendar: Iterable[Any], universe: Any = None,
             previous_day = previous_session[day]
             previous = observations_by_key.get((code, previous_day)) if previous_day else None
             quality_codes = []
+            if definition.get("list_date") and day < definition["list_date"]:
+                quality_codes.append("pre_listing_session")
             current_share = _positive(current.get("total_share")) if current else None
             previous_share = _positive(previous.get("total_share")) if previous else None
             previous_nav = _positive(previous.get("nav")) if previous else None

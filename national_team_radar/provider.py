@@ -24,19 +24,11 @@ from typing import Any
 import warnings
 
 import pandas as pd
+from .universe import ETF_UNIVERSE, COMMON_LIST_DATE, EARLIEST_DATA_DATE
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE_DIR = Path(__file__).resolve().parent / "data"
-ETF_UNIVERSE = [
-    {"ts_code": "510300.SH", "name": "华泰柏瑞沪深300", "index": "沪深300"},
-    {"ts_code": "510310.SH", "name": "易方达沪深300", "index": "沪深300"},
-    {"ts_code": "510330.SH", "name": "华夏沪深300", "index": "沪深300"},
-    {"ts_code": "159919.SZ", "name": "嘉实沪深300", "index": "沪深300"},
-    {"ts_code": "510050.SH", "name": "华夏上证50", "index": "上证50"},
-    {"ts_code": "510500.SH", "name": "南方中证500", "index": "中证500"},
-    {"ts_code": "512100.SH", "name": "南方中证1000", "index": "中证1000"},
-]
 OBSERVATION_COLUMNS = [
     "trade_date", "ts_code", "total_share", "nav", "close", "amount",
     "pct_chg", "source", "nav_ann_date",
@@ -323,6 +315,12 @@ def _cache_usable(meta: dict, start: str, end: str, force: bool) -> bool:
         return False
     try:
         historical = date.fromisoformat(end) < datetime.now(_SHANGHAI).date() - timedelta(days=7)
+        # Long-lived history remains cached; the recent overlap still has to
+        # meet the normal freshness requirement. This does not re-date history.
+        if (date.fromisoformat(end) - date.fromisoformat(start)).days > 730:
+            if not _covers(_segments(meta), start, end):
+                return False
+            start = max(start, (date.fromisoformat(end) - timedelta(days=60)).isoformat())
         fresh_ranges = []
         for item in _segments(meta):
             age = datetime.now(_SHANGHAI) - datetime.fromisoformat(item["fetched_at"])
@@ -331,6 +329,43 @@ def _cache_usable(meta: dict, start: str, end: str, force: bool) -> bool:
         return _covers(fresh_ranges, start, end)
     except (ValueError, KeyError, TypeError):
         return False
+
+
+def _refresh_ranges(meta: dict, start: str, end: str, force: bool) -> list[tuple[str, str]]:
+    """Backfill uncovered history and recheck recent disclosures, bounded by dates.
+
+    Narrow queries still fully refetch their requested interval, so a historical
+    correction can be requested explicitly without discarding the other years.
+    """
+    if not meta or (date.fromisoformat(end) - date.fromisoformat(start)).days <= 730:
+        return [(start, end)]
+    ranges = []
+    cursor = date.fromisoformat(start)
+    finish = date.fromisoformat(end)
+    for segment in sorted(_segments(meta), key=lambda x: x["start"]):
+        lo, hi = date.fromisoformat(segment["start"]), date.fromisoformat(segment["end"])
+        if hi < cursor or lo > finish:
+            continue
+        if lo > cursor:
+            ranges.append((cursor.isoformat(), min(finish, lo - timedelta(days=1)).isoformat()))
+        cursor = max(cursor, hi + timedelta(days=1))
+    if cursor <= finish:
+        ranges.append((cursor.isoformat(), end))
+    tail = max(start, (finish - timedelta(days=60)).isoformat())
+    if not _cache_usable(meta, tail, end, force):
+        ranges.append((tail, end))
+    merged = []
+    for lo, hi in sorted(ranges):
+        if merged and date.fromisoformat(lo) <= date.fromisoformat(merged[-1][1]) + timedelta(days=1):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _latest_updated_at(meta: dict, start: str, end: str) -> str | None:
+    tail = max(start, (date.fromisoformat(end) - timedelta(days=60)).isoformat())
+    return _range_updated_at(meta, tail, end)
 
 
 def _slice(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
@@ -570,8 +605,8 @@ def fetch_market_data(start_date: str, end_date: str, force: bool = False) -> di
     start, end = _iso(start_date), _iso(end_date)
     if start > end:
         raise ValueError("开始日期不能晚于结束日期。")
-    if (date.fromisoformat(end) - date.fromisoformat(start)).days > 3650:
-        raise ValueError("单次查询最多支持十年，请缩短日期范围。")
+    if start < EARLIEST_DATA_DATE:
+        raise ValueError(f"基金历史查询起点不能早于 {EARLIEST_DATA_DATE}")
     fetched_at = _now()
     meta: dict = {
         "requested_start": start, "requested_end": end, "fetched_at": fetched_at,
@@ -613,22 +648,30 @@ def fetch_market_data(start_date: str, end_date: str, force: bool = False) -> di
         old, old_meta = cached[symbol]
         detail: dict = {"errors": [], "warnings": []}
         if _cache_usable(old_meta, start, end, force):
-            detail.update({"mode": "cache", "fetched_at": _range_updated_at(old_meta, start, end), "warnings": old_meta.get("source_warnings", [])[:]})
+            detail.update({"mode": "cache", "fetched_at": _latest_updated_at(old_meta, start, end), "history_oldest_fetched_at": _range_updated_at(old_meta, start, end), "warnings": old_meta.get("source_warnings", [])[:]})
             return symbol, _slice(old, start, end), detail
-        frame = _empty_observations()
+        frame = old.copy()
+        cache_meta = old_meta
+        refresh_ranges = _refresh_ranges(old_meta, start, end, force)
         if client is not None:
-            frame, detail["errors"], detail["warnings"] = _symbol(client, token, symbol, start, end, prefer_combined)
-        valid_share = not frame.empty and frame["total_share"].notna().any()
+            for lo, hi in refresh_ranges:
+                fresh, errors, source_warnings = _symbol(client, token, symbol, lo, hi, prefer_combined)
+                detail["errors"].extend(errors)
+                detail["warnings"].extend(source_warnings)
+                frame = _replace_range(frame, fresh, lo, hi)
+                cache_meta = _manifest(cache_meta, lo, hi, fetched_at)
+        else:
+            frame = _empty_observations()
+        valid_share = not frame.empty and _slice(frame, start, end)["total_share"].notna().any()
         prior_slice = _slice(old, start, end)
         if detail["errors"] and not prior_slice.empty and prior_slice["total_share"].notna().any():
             detail.update({"mode": "stale_cache", "fetched_at": _range_updated_at(old_meta, start, end)})
             detail["warnings"].append(f"{symbol} 部分接口更新失败，保留 {old_meta.get('fetched_at', '未知日期')} 的旧缓存快照，避免混用新旧份额与净值。")
             return symbol, prior_slice, detail
         if valid_share:
-            detail.update({"mode": "live", "fetched_at": fetched_at})
-            frame = _replace_range(old, frame, start, end)
-            source_warnings = list(dict.fromkeys(detail["warnings"] + meta["warnings"]))
-            cache_meta = _manifest(old_meta, start, end, fetched_at, source_warnings=source_warnings)
+            detail.update({"mode": "live", "fetched_at": _latest_updated_at(cache_meta, start, end), "history_oldest_fetched_at": _range_updated_at(cache_meta, start, end), "refreshed_ranges": refresh_ranges})
+            source_warnings = list(dict.fromkeys(old_meta.get("source_warnings", []) + detail["warnings"] + meta["warnings"]))
+            cache_meta["source_warnings"] = source_warnings
             # An incomplete refresh must not acquire an apparently fresh cache TTL.
             if not detail["errors"]:
                 _write_cache(symbol, frame, cache_meta)
@@ -768,12 +811,15 @@ def fetch_market_data(start_date: str, end_date: str, force: bool = False) -> di
         detail["share_start"] = frame.loc[frame["total_share"].notna(), "trade_date"].min() if not frame.empty else None
         detail["share_end"] = frame.loc[frame["total_share"].notna(), "trade_date"].max() if not frame.empty else None
         detail["nav_end"] = frame.loc[frame["nav"].notna(), "trade_date"].max() if not frame.empty else None
+        detail["nav_start"] = frame.loc[frame["nav"].notna(), "trade_date"].min() if not frame.empty else None
+        detail["quote_start"] = frame.loc[frame["close"].notna(), "trade_date"].min() if not frame.empty else None
+        detail["quote_end"] = frame.loc[frame["close"].notna(), "trade_date"].max() if not frame.empty else None
         detail["missing_share_dates"] = sorted(set(calendar) - set(frame.loc[frame["total_share"].notna(), "trade_date"]))
         detail["missing_nav_dates"] = sorted(set(calendar) - set(frame.loc[frame["nav"].notna(), "trade_date"]))
         detail["non_trading_observation_dates"] = sorted(set(frame["trade_date"]) - set(calendar)) if calendar else []
         if detail["non_trading_observation_dates"]:
             meta["warnings"].append(f"{symbol} 有 {len(detail['non_trading_observation_dates'])} 条接口记录日期不在 SSE 开市日历中；计算相邻交易日时应排除。")
-        for key in ("share_start", "share_end", "nav_end"):
+        for key in ("share_start", "share_end", "nav_start", "nav_end", "quote_start", "quote_end"):
             if pd.isna(detail[key]):
                 detail[key] = None
     share_dates = observations.loc[observations["total_share"].notna(), "trade_date"]

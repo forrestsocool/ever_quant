@@ -131,6 +131,7 @@ def _overview(snap: dict) -> dict:
         "recent_alerts": (snap.get("alerts") or [])[:5],
         "recent_observation_events": (snap.get("observation_events") or [])[:5],
         "warnings": (snap.get("quality") or {}).get("warnings", [])[:10],
+        "history": (snap.get("metadata") or {}).get("history", {}),
         "interpretation": "ETF 份额变化反映一级市场净申赎估算，不能确认交易者身份，也不保证收益。",
     }
 
@@ -254,7 +255,7 @@ def _quality(snap: dict) -> dict:
     symbols = {}
     for code, item in (metadata.get("symbols") or {}).items():
         symbols[code] = {key: item.get(key) for key in
-                         ("mode", "fetched_at", "rows", "share_start", "share_end", "nav_end")}
+                         ("mode", "fetched_at", "history_oldest_fetched_at", "rows", "share_start", "share_end", "nav_start", "nav_end", "quote_start", "quote_end")}
         for key in ("missing_share_dates", "missing_nav_dates", "non_trading_observation_dates"):
             values = item.get(key) or []
             symbols[code][key] = values[-20:]
@@ -272,6 +273,7 @@ def _quality(snap: dict) -> dict:
         "auxiliary": auxiliary,
         "navs_excluded_after_cutoff": metadata.get("navs_excluded_after_cutoff"),
         "historical_data_policy": metadata.get("historical_data_policy"),
+        "history": metadata.get("history", {}),
         "sources": snap.get("sources", []),
         "refresh": {**{key: (snap.get("refresh") or {}).get(key) for key in
                        ("running", "stage", "updated_at", "last_attempt_at", "completed_at", "degraded")},

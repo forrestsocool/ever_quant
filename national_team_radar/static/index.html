@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f5f6f3">
   <title>国家队异动雷达 · 宽基 ETF 资金监测</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261017-evidence">
-  <script src="/static/app.js?v=20261017-evidence" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=20261017-history">
+  <script src="/static/app.js?v=20261017-history" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
@@ -74,7 +74,7 @@
         </div>
 
         <section class="panel flow-panel" aria-labelledby="flowChartTitle">
-          <div class="panel-heading"><div><h2 id="flowChartTitle">宽基资金脉搏 <span class="section-count" id="chartDays">日频</span></h2><p>份额变动识别资金需求，历史基准衡量异常程度</p></div><div class="segmented-control" id="rangeControls" aria-label="图表显示交易日"><button data-range="20">20 日</button><button data-range="60" class="active" aria-pressed="true">60 日</button><button data-range="120">120 日</button><button data-range="all">全部</button></div></div>
+          <div class="panel-heading"><div><h2 id="flowChartTitle">宽基资金脉搏 <span class="section-count" id="chartDays">日频</span></h2><p id="historySummary">从七只 ETF 全部上市起持续记录历史资金脉搏</p></div><div class="segmented-control" id="rangeControls" aria-label="图表显示交易日"><button data-range="20">20 日</button><button data-range="60">60 日</button><button data-range="120">120 日</button><button data-range="252">1 年</button><button data-range="1260">5 年</button><button data-range="all" class="active" aria-pressed="true">全部</button></div></div>
           <div class="chart-meta"><div class="chart-legend"><span><i class="legend-bar positive"></i>净申购</span><span><i class="legend-bar negative"></i>净赎回</span><span><i class="legend-line"></i>Z 异常度</span><span class="threshold-legend"><i class="legend-dashed"></i>异动阈值</span></div><button type="button" class="index-toggle" id="indexToggle" aria-pressed="true" aria-label="显示沪深300指数曲线"><i class="legend-index"></i><span>沪深300指数</span><span class="index-toggle-state" id="indexToggleState">显示中</span></button></div>
           <div class="chart-container" id="mainChart" aria-label="每日估算净申赎、沪深300指数及 Z 异常度图表"><div class="chart-empty"><div class="empty-orbit"></div><strong>等待真实资金数据</strong><p>点击「更新真实数据」开始监测观察池</p></div></div>
           <div class="chart-foot"><span id="chartFootText"><i class="foot-dot"></i>左轴为估算净申赎（亿元），右轴为沪深300（点）；底部为 Z 异常度。缺失值留空。</span><button class="text-button" id="chartSettings">调整监测参数 <span>↗</span></button></div>

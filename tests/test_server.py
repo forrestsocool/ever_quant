@@ -229,14 +229,38 @@ def test_scheduler_catches_up_after_busy_slot_and_preserves_start(configured, mo
     assert calls[0]["end"] == "2026-10-15"
 
 
-def test_restart_restores_last_range_but_explicit_cli_range_wins(configured):
+def test_restart_expands_legacy_cache_to_common_listing_date_but_explicit_cli_wins(configured):
     store, days = configured
     raw = {**store.data, "observations": store.data["observations"].to_dict(orient="records")}
     server.atomic_json(server.DATA / "market_data.json", raw)
     loaded = server.RadarStore()
-    assert loaded.defaults == (days[0], days[-1])
+    assert loaded.defaults == (server.COMMON_LIST_DATE, server.cn_now().date().isoformat())
     explicit = server.RadarStore(days[10], days[20])
     assert explicit.defaults == (days[10], days[20])
+
+
+def test_history_has_no_five_year_cap_and_reports_actual_coverage(configured):
+    store, _ = configured
+    assert server.parse_dates(None, None)[0] == "2016-11-04"
+    assert server.parse_dates("2005-02-23", "2026-10-16") == ("2005-02-23", "2026-10-16")
+    result = store.snapshot()
+    history = result["metadata"]["history"]
+    assert history["common_listing_date"] == "2016-11-04"
+    assert history["first_complete_date"]
+    assert history["complete_days"] <= history["trading_days"]
+    assert history["first_z_date"]
+
+
+def test_default_store_historical_refresh_never_shrinks_global_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "DATA", tmp_path)
+    store = server.RadarStore()
+    calls = []
+    class Thread:
+        def __init__(self, **kwargs): calls.append(kwargs)
+        def start(self): pass
+    monkeypatch.setattr(server.threading, "Thread", Thread)
+    assert store.refresh("2025-01-01", "2025-12-31")
+    assert calls[0]["args"][:2] == ("2016-11-04", server.cn_now().date().isoformat())
 
 
 def test_pandas_missing_scalars_are_serialized_as_null(tmp_path):
