@@ -9,4 +9,6 @@ __pycache__/
 
 # Local data cache
 national_team_radar/data/
+data/
+.audit/
 *.csv.bak

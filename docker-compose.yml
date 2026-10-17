@@ -11,6 +11,7 @@ services:
       # Tushare Token: 可在此直接填写，或在同目录下创建 .env 文件注入
       - TUSHARE_TOKEN=${TUSHARE_TOKEN}
       - SXSC_TUSHARE_TOKEN=${SXSC_TUSHARE_TOKEN:-}
+      - ALLOWED_HOSTS=127.0.0.1,localhost,radar.sensen.li
     volumes:
       # 宿主机挂载目录，确保历史数据缓存与每日快照持久化保存
       - ./data:/app/national_team_radar/data

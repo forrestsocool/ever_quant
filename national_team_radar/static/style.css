@@ -60,3 +60,18 @@ body{font-size:14px;line-height:1.7}.topbar{height:49px}.topbar,.breadcrumb,.bre
 .flow-panel .chart-foot{color:#71836e;font-size:12px;line-height:1.6}
 @media(max-width:760px){#mainChart{height:315px}.flow-panel .chart-meta{align-items:flex-start}.index-toggle{margin-left:0}}
 @media(max-width:480px){#mainChart{height:305px}.flow-panel .chart-legend{gap:9px;font-size:11px}.index-toggle{font-size:11px;min-height:31px}.flow-panel .chart-foot>span{line-height:1.65}}
+/* Provenance and coverage stay below the main flow chart. */
+.monitoring-coverage { border-top:1px solid var(--border,#e3e5df); margin-top:18px; padding-top:16px; }
+.monitoring-coverage h3 { font-size:14px; margin:0 0 7px; }
+.monitoring-coverage p,.crosscheck-channel p { color:var(--muted,#69716a); font-size:11px; line-height:1.7; margin:5px 0 9px; overflow-wrap:anywhere; }
+.coverage-method { padding:9px 0; border-bottom:1px solid var(--border,#e3e5df); }
+.coverage-method > div { display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:12px; }
+.coverage-state { font-size:10px; white-space:nowrap; border-radius:4px; padding:2px 6px; background:#f3eee3; color:#8a681d; }
+.coverage-state.ok { background:#eaf2ec; color:#326549; }
+.source-status,.crosscheck-channel { margin-top:12px; font-size:12px; }
+.source-status summary,.crosscheck-channel summary { cursor:pointer; line-height:1.7; }
+.crosscheck-channel summary span { color:#788077; font-size:10px; }
+.crosscheck-row { display:flex; flex-wrap:wrap; gap:5px 10px; padding:7px 0; border-bottom:1px solid #edf0ea; font-size:11px; }
+.crosscheck-row time { color:#7c827b; }
+.crosscheck-row span { flex-basis:100%; overflow-wrap:anywhere; }
+.crosscheck-error { color:#9b6739!important; }

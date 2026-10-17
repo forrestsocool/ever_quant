@@ -15,6 +15,7 @@ from national_team_radar import server
 def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "DATA", tmp_path)
     monkeypatch.setattr(server, "load_evidence", lambda: [])
+    monkeypatch.setattr(server, "refresh_cross_validation", lambda *args: None)
     days = pd.bdate_range("2026-06-01", periods=65).strftime("%Y-%m-%d").tolist()
     rows = []
     for code in server.ETF_UNIVERSE:
@@ -59,6 +60,19 @@ def test_local_mutation_rejects_cross_site(configured):
     with TestClient(server.create_app(store, auto_update=False, initial_refresh=False)) as client:
         assert client.post("/api/refresh", json={}, headers={"Origin": "https://unrelated.example"}).status_code == 403
         assert client.get("/api/config", headers={"Host": "unrelated.example"}).status_code == 403
+        assert client.get("/api/config", headers={"Host": "evil.radar.sensen.li"}).status_code == 403
+
+
+def test_remote_mcp_is_mounted_and_refresh_has_global_cooldown(configured):
+    store, _ = configured
+    store.state["last_attempt_at"] = server.cn_now().isoformat()
+    with TestClient(server.create_app(store, auto_update=False, initial_refresh=False)) as client:
+        assert client.post("/api/refresh", json={}).status_code == 429
+        response = client.post("/mcp", headers={"Accept": "application/json, text/event-stream"}, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}})
+        assert response.status_code == 200
+        assert response.json()["result"]["serverInfo"]["name"] == "national-team-etf-flow-radar"
 
 
 def test_failed_refresh_keeps_last_data(configured, monkeypatch):

@@ -10,7 +10,7 @@ python -m pip install -r radar_requirements.txt
 python run_radar.py
 ```
 
-浏览器打开 http://127.0.0.1:8765 。首次启动自动读取数据；以后先显示本地缓存，再更新。服务仅监听本机。
+浏览器打开 http://127.0.0.1:8765 。首次启动自动读取数据；以后先显示本地缓存，再更新。默认仅监听本机；Docker 绑定容器内0.0.0.0并经服务器Nginx提供HTTPS。
 
 ```powershell
 # 仅更新并输出快照、预警，不启动网页
@@ -75,43 +75,26 @@ python E:\Project\ever_quant\run_radar_mcp.py
 }
 ```
 
-### 核心决策接口（突出重点，驱动 AI 择时投机与获利了结）
+### AI 读取顺序与决策边界
 
-1. **一站式高光速览：`get_fund_pulse_snapshot`**
-   - 突出重点，一键返回最新资金脉搏定性（极强托底/大额净流入/均衡/大额赎回预警）、沪深300收盘与涨跌幅、量价背离警示、以及为下游 AI 提炼的最高优先级一句话操作建议。
+先调用 `get_fund_pulse_snapshot` 或 `get_market_timing_brief`，读取 `decision_state`、截止日、覆盖率、逐项检查与 `blocking_reasons`。`get_monitoring_coverage` 列出原始监测清单的实际接入状态。`get_cross_validation(channel='official')` 读取官方增减持披露；其他渠道为 `holders`、`dragon_tiger`、`block_trades`、`large_orders`，每次最多120条，支持offset分页。
 
-2. **择时投机决策：`get_speculation_signals(end_date=None, risk_preference='balanced')`**
-   - 产出 **0-100 分量化投机评分** 与 **明确操作指令**（`STRONG_SPECULATIVE_BUY` 强烈做多 / `SPECULATIVE_BUY` 逢低试探 / `ACCUMULATE` 温和吸筹 / `AVOID` 规避）。
-   - **量价底背离检测**：精准识别“沪深300指数下跌但宽基遭遇大额逆势资金净流入”的典型国家队/机构托底抄底信号。
-   - **执行策略**：提供建议建仓仓位比例（如 50% 积极仓位）、优选目标 ETF 榜单（按净申购量与单基 Z 值排序）、沪深300参考支撑位、第一/第二止盈目标线及止损保护点位。
+`get_speculation_signals` 与 `get_profit_taking_signals` 保留为兼容接口，共用主摘要的数据门槛。版本2仅返回入场/退出观察条件；原先未经回测的0–100评分、胜率、固定仓位和目标价均返回空值。当前数据不完整、缓存超过72小时、日历覆盖过期、Z基准缺失或同日指数缺失时，所有决策视图一致返回 `INSUFFICIENT_DATA`。历史数值仍可追溯，但不视为当前信号。
 
-3. **获利了结与防守：`get_profit_taking_signals(end_date=None, holding_return_pct=None, cost_benchmark_level=None)`**
-   - 产出 **0-100 分出局紧迫度评分** 与 **明确出局指令**（`STRONG_TAKE_PROFIT` 果断止盈 / `PARTIAL_TAKE_PROFIT` 分批减仓 / `TRAILING_STOP` 移动止盈 / `HOLD_SAFE` 安心持有）。
-   - **量价顶背离检测**：捕捉“指数冲高上涨但宽基资金大额撤退减持”的逢高派发风险。
-   - **执行策略**：建议减仓比例（如减仓 50%）、移动止盈保护规则、以及赎回压力最大的高危 ETF 明细。
+`get_daily_series` 和 `get_etf_detail` 提供历史数据，`get_historical_events` 提供事件，`get_data_quality` 和 `get_methodology` 提供口径。`get_csi300_correlation_analysis` 仅计算完整同日样本的相关性，未验证下一期收益；同日资金与指数方向相反不证明市场见底或见顶。资源与提示模板采用相同边界。
 
-4. **宏观协同分析：`get_csi300_correlation_analysis(limit=60)`**
-   - 计算历史区间宽基资金流与沪深300指数的滚动相关系数，统计历史底背离与顶背离发生次数及后续行情特征。
-
-### 辅助穿透工具与资源
-- `get_market_timing_brief`：阈值硬性匹配与阻断原因核验。
-- `get_radar_overview`：核对最新披露、完整日与预警列表。
-- `get_daily_series`：历史日序列与同日沪深300指数（支持 limit/offset 分页）。
-- `get_etf_detail`：逐只 ETF 深度穿透历史数据与贡献来源。
-- `get_data_quality` & `get_methodology`：数据质量与计算口径说明。
-- **资源 (`radar://`)**：`radar://pulse`（脉搏快照）、`radar://speculation`（投机信号）、`radar://profit-taking`（了结信号）、`radar://overview`、`radar://timing`、`radar://universe` 等。
-- **内置 Prompt 模板**：`timing_speculation_strategy`（择时投机分析报告模板）、`profit_taking_strategy`（获利了结与风控报告模板）。
+网页服务同时在 `/mcp` 提供标准 Streamable HTTP 只读 MCP，线上地址为 `https://radar.sensen.li/mcp`。客户端可使用 `{"mcpServers":{"radar":{"url":"https://radar.sensen.li/mcp"}}}`（具体字段按客户端格式）。本机 stdio 接入方式仍可用。所有 MCP 工具只读取缓存，不刷新外部数据，不执行交易。
 
 ## 交叉验证
 
-`national_team_radar/evidence.csv` 可以记录独立证据：
+可在持久化目录 `national_team_radar/data/evidence.csv` 记录人工证据；不存在时兼容读取包内 `national_team_radar/evidence.csv`：
 
 ```csv
 date,title,url,kind
 2025-04-07,已核实的公告标题,https://发布机构/公告地址,official
 ```
 
-上面仅是格式示例，程序自带文件为空。`kind` 可用 `official`、`holding`、`market`。请填写公告真实发布日期；页面不会将晚于观察日的记录用于该日展示。此版本不会自动抓取公告、龙虎榜或机构身份数据，证据需要手工核实补充。
+上面仅是格式示例，程序自带文件为空。`kind` 可用 `official`、`holding`、`market`。请填写公告真实发布日期；页面不会将晚于观察日的记录用于该日展示。公告已自动扫描汇金、证金、社保官方栏目；请求失败会显示不可用并保留旧记录，不降级为“没有公告”。网页同时展示来源检查时间。官方公告的发布日期、首次采集时间分别保存，历史回看只按公告日过滤，并非严格时点可见性回测。
 
 份额异常、成交额异常和多只 ETF 同步均属于市场行为线索，彼此不能替代买方身份披露。看板不生成“国家队买入金额”或身份置信概率。需要官方增持公告、持有人定期报告等独立材料才能进一步核实。
 
@@ -119,7 +102,7 @@ date,title,url,kind
 
 原始市场数据、来源状态和分析结果保存在 `national_team_radar/data/`，该目录已忽略。刷新失败会保留旧数据并显示错误，不悄悄切换到演示数据。默认查询过去一年，抓取起点会额外提前270个自然日，供历史基准计算使用；网页只显示所选区间。
 
-服务运行期间，按北京时间工作日09:00和18:30自动更新；交易日判断由交易日历负责。电脑休眠、程序退出时不运行；恢复或启动后，会补执行当日最近一个已到时点，繁忙时延后执行，历史日期的时点不会逐一补跑。需要无人值守时可在已有 Windows 任务计划中调用 `python E:\Project\ever_quant\run_radar.py --once`。
+服务运行期间，按北京时间工作日09:00、18:30和21:30自动更新；交易日判断由交易日历负责。电脑休眠、程序退出时不运行；恢复或启动后，会补执行当日最近一个已到时点，繁忙时延后执行，历史日期的时点不会逐一补跑。需要无人值守时可在已有 Windows 任务计划中调用 `python E:\Project\ever_quant\run_radar.py --once`。
 
 - `data/market_data.json`：标准化观察记录、交易日历、来源元数据。
 - `data/snapshot.json`：默认阈值下最近一次更新的雷达结果。
@@ -134,3 +117,20 @@ date,title,url,kind
 - [上交所：ETF 常见问题](https://www.sse.com.cn/assortment/fund/etf/question/)
 - [Tushare：基金份额](https://tushare.pro/document/2?doc_id=207)
 - [Tushare：ETF 份额规模](https://tushare.pro/document/2?doc_id=408)
+
+## 监测覆盖与限制
+
+| 手段 | 当前实现 | 范围与限制 |
+| --- | --- | --- |
+| ETF份额、净申赎与同步性 | 已实现 | 七只固定观察池；不能识别交易主体 |
+| 官方增减持公告 | 自动扫描 | 汇金近三年栏目、证金/社保近页；官网TLS、结构与可达性逐源报告；不是全网完整归档 |
+| 上市公司股东披露 | Tushare `top10_holders` | 默认工行、建行、农行、中行、平安、中信证券六只样本；可用 `RADAR_STOCK_UNIVERSE` 扩展最多30只；公告日与报告期分开 |
+| 龙虎榜 | Tushare `top_inst` | 最近5交易日机构专用席位，不合计重复榜单，不等于国家队 |
+| 大宗交易 | Tushare `block_trade` | 最近5交易日；成交金额按价格×万股数换算，每笔存在买卖双方，不能当净流入 |
+| 超大单 | Tushare `moneyflow` | 六只样本股最近5交易日；主动买卖差与数据商净额分列，非全市场主力资金 |
+| ETF定期报告持有人 | 尚未自动解析 | 上市公司前十大股东不等于ETF前十大持有人；需进一步解析基金年报/半年报 |
+| 盘中IOPV/实时折溢价 | 未接入 | 日频收盘价与净值不能替代实时IOPV |
+
+辅助Tushare接口权限不足或不可用时，显示“不可用/部分可用”，不填0。所有辅助渠道不自动加分，基金份额、资金规模、Z值与同步性属同一数据族，不能当作多项独立身份证据。
+
+新增缓存 `disclosures.json` 和 `crosschecks.json` 随Docker数据卷持久保存；手工证据也应放入数据卷。官方源六小时、交易辅助源两小时内复用缓存。21:30补采覆盖部分数据商晚间披露；该系统是日频雷达，不是实时交易系统。

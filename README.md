@@ -9,15 +9,15 @@ EverQuant 是一个轻量级、面向实战的量化投资与市场流动性分�
 ### 1. 国家队异动雷达 / 宽基资金脉搏 (`national_team_radar/`)
 - **真实数据监测**：跟踪核心宽基 ETF（510300、510310、510330、159919 沪深300；510050 上证50；510500 中证500；512100 中证1000）一级市场真实份额变动与前日净值估算净申赎。
 - **宽基资金脉搏图表**：双 Y 轴可视化，左轴展示七只核心 ETF 估算净申赎（亿元），右轴展示沪深 300 指数收盘点位，支持一键切换显示/隐藏指数。
-- **跨基金同向共振与 Z 异常度**：基于滚动基准与严格统计检验评估异常申购/赎回。
+- **跨基金同向共振与 Z 异常度**：按滚动历史基准观察异常申购/赎回，规则尚未经收益回测校准。
 - **交互 Web 界面**：本地极速仪表盘（FastAPI + 原生轻量响应式前端）。
 
 ### 2. MCP (Model Context Protocol) 智能体分析服务 (`national_team_radar/mcp_server.py`)
 - 为 AI 客户端（如 Claude Desktop、Cursor、Codex 等）提供标准的 MCP 工具与资源：
   - `get_fund_pulse_snapshot`：一站式全景快照，突出重点，一键返回最新资金脉搏定性、沪深300对比与核心决策摘要。
-  - `get_speculation_signals`：**专为 AI 择时投机打造**。输出 0-100 量化评分、操作建议（`STRONG_SPECULATIVE_BUY` 等）、具体建仓仓位建议、量价底背离托底检测、止损与止盈点位参考。
-  - `get_profit_taking_signals`：**专为 AI 获利了结打造**。评估赎回压力与顶背离风险，输出出局紧迫度评分、操作指令（`STRONG_TAKE_PROFIT` 等）、建议减仓比例与移动止盈保护规则。
-  - `get_csi300_correlation_analysis`：沪深300指数与资金脉搏协同分析（滚动相关系数、底背离与顶背离统计）。
+  - `get_speculation_signals` / `get_profit_taking_signals`：质量门槛一致的入场/退出观察；不输出未经回测的胜率、仓位或目标价。
+  - `get_monitoring_coverage` / `get_cross_validation`：官方公告、样本股东披露、龙虎榜、大宗交易与超大单，明确接入缺口、公告日和来源状态。
+  - `get_csi300_correlation_analysis`：完整同日样本相关性，不能据此推断下一日收益或政策底。
   - `get_market_timing_brief` & `get_radar_overview`：观察条件核验、最新披露与预警。
   - `get_daily_series` & `get_etf_detail`：逐日历史流与单基穿透。
   - `get_data_quality` & `get_methodology`：数据质量与计算方法论。
@@ -64,6 +64,8 @@ python run_radar.py
 ```bash
 python run_radar_mcp.py
 ```
+
+线上只读 MCP：`https://radar.sensen.li/mcp`，支持 Streamable HTTP。
 
 ### Docker 容器化与服务器部署
 

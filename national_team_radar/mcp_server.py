@@ -8,14 +8,17 @@ and cutoff rules as the dashboard.
 from __future__ import annotations
 
 import json
+import math
+from datetime import datetime, timezone
 import threading
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .provider import ETF_UNIVERSE
-from .server import DATA, DEFAULTS, ROOT, RadarStore
+from .server import DATA, DEFAULTS, ROOT, RadarStore, cn_now
 
 
 def _validated_config(window: int, z_threshold: float, min_flow_yi: float, sync_min: int) -> dict:
@@ -43,6 +46,8 @@ def _snapshot(store: RadarStore, *, start_date: str | None = None, end_date: str
     source_latest = max(source_calendar) if source_calendar else (result.get("quality") or {}).get("calendar_latest_session")
     result["_mcp_explicit_end_date"] = end_date
     result["_mcp_source_calendar_latest"] = source_latest
+    source_metadata = raw_data.get("metadata", {}) if isinstance(raw_data, dict) else result.get("metadata", {})
+    result["_mcp_calendar_coverage_end"] = source_metadata.get("fetched_end_date") or source_metadata.get("requested_end_date") or source_metadata.get("view_end_date")
     return result
 
 
@@ -58,6 +63,16 @@ def _context(snap: dict) -> dict:
     source_latest = snap.get("_mcp_source_calendar_latest") or calendar_latest
     explicit_end = snap.get("_mcp_explicit_end_date")
     complete_date = last_complete.get("date")
+    coverage_end = snap.get("_mcp_calendar_coverage_end") or metadata.get("view_end_date")
+    try:
+        calendar_expired = (cn_now().date() - datetime.fromisoformat(coverage_end).date()).days > 3
+    except (ValueError, TypeError):
+        calendar_expired = True
+    updated = refresh.get("updated_at")
+    try:
+        age_hours = (cn_now() - datetime.fromisoformat(updated).astimezone(cn_now().tzinfo)).total_seconds() / 3600
+    except (ValueError, TypeError):
+        age_hours = None
     return {
         "data_as_of": snap.get("as_of"),
         "calendar_latest": calendar_latest,
@@ -77,6 +92,10 @@ def _context(snap: dict) -> dict:
         "refresh_degraded": bool(refresh.get("degraded")),
         "refresh_error": bool(refresh.get("error")),
         "source_health": metadata.get("refresh_health", "unknown"),
+        "cache_age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "cache_stale": age_hours is None or age_hours > 72 or age_hours < -1,
+        "calendar_coverage_end": coverage_end,
+        "calendar_expired": calendar_expired,
     }
 
 
@@ -129,8 +148,19 @@ def _timing_brief(snap: dict) -> dict:
     csi300 = _benchmark_on(snap, day)
     current = (context["latest_session_complete"] and not context["historical_cutoff"]
                and not context["refresh_degraded"] and not context["refresh_error"]
-               and not context["refresh_running"] and csi300 is not None)
+               and not context["refresh_running"] and csi300 is not None
+               and not context["cache_stale"] and context["source_health"] == "ok"
+               and not context["calendar_expired"]
+               and row.get("z_score") is not None)
     blocking = []
+    if context["cache_stale"]:
+        blocking.append("缓存来源时间未知或超过72小时；即使缓存日历自洽，也不能视为最新市场状态")
+    if context["calendar_expired"]:
+        blocking.append("交易日历查询覆盖已过期；请先将抓取截止日更新至当前日期")
+    if context["source_health"] != "ok":
+        blocking.append("市场来源健康状态未通过校验")
+    if row.get("z_score") is None:
+        blocking.append("缺少完整统计基准，Z值不可用，不能评估异动门槛")
     if not context["latest_session_complete"]:
         blocking.append("最新交易日组合数据未完整披露；下述信号属于较早的完整交易日")
     if context["historical_cutoff"]:
@@ -250,446 +280,67 @@ def _quality(snap: dict) -> dict:
 
 
 def _speculation_signals(snap: dict, risk_preference: str = "balanced") -> dict:
-    context = _context(snap)
-    config = snap.get("config") or DEFAULTS
-    row = snap.get("last_complete")
-    if not row:
-        return {
-            "schema_version": 1,
-            "context": context,
-            "speculation_action": "INSUFFICIENT_DATA",
-            "speculation_score": 0.0,
-            "confidence_level": "LOW",
-            "headline": "缺少可比的完整交易日数据",
-            "bottom_divergence": False,
-            "timing_rationale": "当前区间没有全组合可比的交易日，无法评估宽基资金异动与择时信号。",
-            "execution_guide": {},
-            "invalidation_triggers": [],
-            "interpretation": "数据不足，暂不产出投机信号。",
-        }
-
-    day = row["date"]
-    csi300 = _benchmark_on(snap, day)
-    csi300_close = csi300.get("close") if csi300 else None
-    csi300_pct_chg = csi300.get("pct_chg") if csi300 else None
-
-    flow = row.get("flow_yi")
-    z = row.get("z_score")
-    sync_in = row.get("sync_in") or 0
-    sync_out = row.get("sync_out") or 0
-    flow_5d = row.get("flow_5d_yi")
-    flow_20d = row.get("flow_20d_yi")
-
-    bottom_divergence = bool(
-        flow is not None and flow >= config["min_flow_yi"] and z is not None and z >= 1.5
-        and csi300_pct_chg is not None and csi300_pct_chg < 0
-    )
-
-    score = 50.0
-    factors = []
-
-    if flow is not None:
-        if flow >= 200.0:
-            score += 25.0
-            factors.append(f"单日资金呈特大级净申购（+{flow:.1f} 亿元）")
-        elif flow >= 100.0:
-            score += 20.0
-            factors.append(f"单日资金呈巨额净申购（+{flow:.1f} 亿元）")
-        elif flow >= 50.0:
-            score += 15.0
-            factors.append(f"单日资金呈显著净申购（+{flow:.1f} 亿元）")
-        elif flow >= 20.0:
-            score += 10.0
-            factors.append(f"单日资金呈中度净申购（+{flow:.1f} 亿元）")
-        elif flow >= config["min_flow_yi"]:
-            score += 5.0
-            factors.append(f"单日资金达到异动门槛（+{flow:.1f} 亿元）")
-        elif flow <= -100.0:
-            score -= 35.0
-            factors.append(f"单日资金出现巨额净赎回（{flow:.1f} 亿元）")
-        elif flow <= -20.0:
-            score -= 20.0
-            factors.append(f"单日资金呈显著净赎回（{flow:.1f} 亿元）")
-        elif flow < 0:
-            score -= 10.0
-            factors.append(f"单日资金呈净流出态势（{flow:.1f} 亿元）")
-
-    if z is not None:
-        if z >= 5.0:
-            score += 20.0
-            factors.append(f"统计异常度极高（Z = +{z:.2f}）")
-        elif z >= 3.0:
-            score += 15.0
-            factors.append(f"统计异常度显著（Z = +{z:.2f}）")
-        elif z >= config["z_threshold"]:
-            score += 10.0
-            factors.append(f"统计异常度达到阈值（Z = +{z:.2f}）")
-        elif z >= 1.0:
-            score += 5.0
-        elif z <= -3.0:
-            score -= 20.0
-            factors.append(f"负向统计异常显著（Z = {z:.2f}）")
-        elif z <= -config["z_threshold"]:
-            score -= 10.0
-            factors.append(f"负向统计异常度达标（Z = {z:.2f}）")
-
-    if sync_in >= 4:
-        score += 15.0
-        factors.append(f"多达 {sync_in} 只核心宽基同向同步大额净申购")
-    elif sync_in >= config["sync_min"]:
-        score += 10.0
-        factors.append(f"{sync_in} 只核心宽基同向同步大额净申购")
-    elif sync_in >= 2:
-        score += 5.0
-        factors.append(f"{sync_in} 只核心宽基出现局部同步申购")
-
-    if bottom_divergence:
-        score += 15.0
-        factors.append(f"量价底背离：指数单日下跌 {csi300_pct_chg:.2f}%，资金逆势巨额抄底托底")
-
-    if flow_5d is not None:
-        if flow_5d >= 100.0:
-            score += 10.0
-            factors.append(f"近 5 日累计净流入达 +{flow_5d:.1f} 亿元，动量强劲")
-        elif flow_5d >= 30.0:
-            score += 5.0
-        elif flow_5d <= -50.0:
-            score -= 15.0
-            factors.append(f"近 5 日累计净流出达 {flow_5d:.1f} 亿元，流动性承压")
-
-    score = max(0.0, min(100.0, round(score, 1)))
-
-    if score >= 80.0:
-        action = "STRONG_SPECULATIVE_BUY"
-        headline = "极强资金托底支撑，胜率高，建议积极做多 / 逢低重仓投机"
-        confidence = "HIGH"
-    elif score >= 65.0:
-        action = "SPECULATIVE_BUY"
-        headline = "资金显著异常净流入，建议逢低买入试探 / 积极博弈反弹"
-        confidence = "HIGH" if bottom_divergence else "MEDIUM"
-    elif score >= 55.0:
-        action = "ACCUMULATE"
-        headline = "资金呈现温和净申购，建议分批吸筹 / 定投式逢低配置"
-        confidence = "MEDIUM"
-    elif score <= 35.0:
-        action = "AVOID"
-        headline = "资金呈现净流出态势，规避多头投机，防范阴跌风险"
-        confidence = "HIGH" if sync_out >= 2 else "MEDIUM"
-    else:
-        action = "NEUTRAL_WAIT"
-        headline = "多空资金相对均衡，建议多看少动、等待明确方向信号"
-        confidence = "LOW"
-
-    pref = risk_preference.lower()
-    if action == "STRONG_SPECULATIVE_BUY":
-        pos_pct = 70 if pref == "aggressive" else (50 if pref == "balanced" else 30)
-        pos_text = f"建议 {pos_pct}% 仓位积极参与，分两批在盘中震荡回调时建仓"
-    elif action == "SPECULATIVE_BUY":
-        pos_pct = 50 if pref == "aggressive" else (30 if pref == "balanced" else 20)
-        pos_text = f"建议 {pos_pct}% 仓位试探性建仓，严格设好止损"
-    elif action == "ACCUMULATE":
-        pos_pct = 30 if pref == "aggressive" else (20 if pref == "balanced" else 10)
-        pos_text = f"建议 {pos_pct}% 底仓分批低吸，不宜追高"
-    elif action == "AVOID":
-        pos_text = "建议空仓或极轻仓（< 10%），等待流动性企稳"
-    else:
-        pos_text = "建议保持 10% - 20% 观望仓位，暂不加大赌注"
-
-    etf_rankings = []
-    for item in snap.get("etfs", []):
-        code = item.get("ts_code")
-        series_item = next((r for r in reversed((snap.get("etf_series") or {}).get(code, [])) if r.get("date") == day), None)
-        if series_item:
-            etf_rankings.append({
-                "ts_code": code,
-                "name": item.get("name"),
-                "index": item.get("index"),
-                "flow_yi": series_item.get("flow_yi"),
-                "z_score": series_item.get("z_score"),
-                "delta_share_yi": series_item.get("delta_share_yi"),
-                "share_change_pct": series_item.get("share_change_pct"),
-                "close": series_item.get("close"),
-            })
-    etf_rankings.sort(key=lambda x: (x.get("flow_yi") is not None, x.get("flow_yi") or -9999), reverse=True)
-    top_targets = etf_rankings[:3] if etf_rankings else []
-
-    levels = {}
-    if csi300_close:
-        levels = {
-            "csi300_evaluated_close": csi300_close,
-            "stop_loss_benchmark_level": round(csi300_close * 0.982, 2),
-            "take_profit_target_1": round(csi300_close * 1.03, 2),
-            "take_profit_target_2": round(csi300_close * 1.065, 2),
-        }
-
+    brief = _timing_brief(snap)
+    entry = brief.get("entry_support") or {}
+    row = brief.get("portfolio") or {}
+    usable = brief["decision_state"] != "insufficient_data"
+    action = "ENTRY_WATCH" if entry.get("current_session_usable") else "NEUTRAL_WATCH" if usable else "INSUFFICIENT_DATA"
     return {
-        "schema_version": 1,
-        "context": context,
-        "evaluated_session": day,
-        "speculation_action": action,
-        "speculation_score": score,
-        "confidence_level": confidence,
-        "headline": headline,
-        "bottom_divergence": bottom_divergence,
-        "observed_metrics": {
-            "flow_yi": flow,
-            "z_score": z,
-            "sync_in": sync_in,
-            "sync_out": sync_out,
-            "flow_5d_yi": flow_5d,
-            "flow_20d_yi": flow_20d,
-            "csi300_close": csi300_close,
-            "csi300_pct_chg": csi300_pct_chg,
-        },
-        "score_factors": factors,
-        "execution_guide": {
-            "risk_preference": risk_preference,
-            "suggested_position": pos_text,
-            "top_target_etfs": top_targets,
-            "reference_levels": levels,
-        },
-        "invalidation_triggers": [
-            "次日组合资金转为净赎回（金额 > 15 亿元且 Z < -1.5）",
-            "沪深300收盘有效跌破止损参考线",
-            "同向大额申购的龙头 ETF 出现突发份额撤回或净值下修",
-        ],
-        "interpretation": "ETF 份额变化反映一级市场估算净申赎。量价底背离大额申购为统计强势信号，但并不保证未来 100% 获利，请严格执行止损纪律。",
+        "schema_version": 2, "context": brief["context"], "evaluated_session": brief.get("evaluated_session"),
+        "speculation_action": action, "speculation_score": None, "confidence_level": "UNCALIBRATED",
+        "headline": "集中净申购条件成立，进入入场观察" if action == "ENTRY_WATCH" else "当前未形成完整入场条件" if usable else "数据时效或完整性不足，暂停当前择时判断",
+        "decision_state": brief["decision_state"], "checks": entry.get("checks", {}),
+        "blocking_reasons": brief.get("blocking_reasons", [brief.get("reason")]),
+        "observed_metrics": row, "csi300": brief.get("csi300"),
+        "contrary_observations": brief.get("contrary_observations", []),
+        "bottom_divergence": None,
+        "execution_guide": {"risk_preference": risk_preference, "suggested_position": None, "reference_levels": {},
+                            "required_inputs": ["真实持仓和成本", "投资期限", "可承担亏损", "流动性与交易约束"]},
+        "calibration_status": "规则未经时点可见性回测；不输出胜率、仓位比例或凭空生成的止盈止损价位",
+        "interpretation": "单日指数下跌与ETF净申购方向相反，只是同日方向对照，不能证明市场见底、国家队抄底或未来获利。",
     }
 
 
-def _profit_taking_signals(
-    snap: dict,
-    holding_return_pct: float | None = None,
-    cost_benchmark_level: float | None = None,
-) -> dict:
-    context = _context(snap)
-    config = snap.get("config") or DEFAULTS
-    row = snap.get("last_complete")
-    if not row:
-        return {
-            "schema_version": 1,
-            "context": context,
-            "profit_taking_action": "INSUFFICIENT_DATA",
-            "exit_urgency_score": 0.0,
-            "suggested_reduction_pct": 0,
-            "headline": "缺少可比的完整交易日数据",
-            "top_divergence": False,
-            "observed_metrics": {},
-            "score_factors": [],
-            "execution_guide": {},
-            "interpretation": "当前区间没有全组合可比的交易日，无法评估宽基资金赎回压力与了结信号。",
-        }
-
-    day = row["date"]
-    csi300 = _benchmark_on(snap, day)
-    csi300_close = csi300.get("close") if csi300 else None
-    csi300_pct_chg = csi300.get("pct_chg") if csi300 else None
-
-    flow = row.get("flow_yi")
-    z = row.get("z_score")
-    sync_out = row.get("sync_out") or 0
-    sync_in = row.get("sync_in") or 0
-    flow_5d = row.get("flow_5d_yi")
-
-    top_divergence = bool(
-        flow is not None and flow <= -config["min_flow_yi"] and z is not None and z <= -1.5
-        and csi300_pct_chg is not None and csi300_pct_chg > 0.3
-    )
-
-    urgency = 15.0
-    factors = []
-
-    if flow is not None:
-        if flow <= -150.0:
-            urgency += 40.0
-            factors.append(f"单日资金遭遇极端大额净赎回（{flow:.1f} 亿元）")
-        elif flow <= -80.0:
-            urgency += 30.0
-            factors.append(f"单日资金遭遇巨额净赎回（{flow:.1f} 亿元）")
-        elif flow <= -30.0:
-            urgency += 20.0
-            factors.append(f"单日资金出现显著净赎回（{flow:.1f} 亿元）")
-        elif flow <= -config["min_flow_yi"]:
-            urgency += 12.0
-            factors.append(f"单日资金赎回达到异动阈值（{flow:.1f} 亿元）")
-        elif flow > 50.0:
-            urgency -= 15.0
-            factors.append(f"单日资金大额净申购（+{flow:.1f} 亿元），流动性支撑充足")
-        elif flow > 0:
-            urgency -= 10.0
-            factors.append(f"单日资金保持净流入（+{flow:.1f} 亿元）")
-
-    if z is not None:
-        if z <= -4.0:
-            urgency += 25.0
-            factors.append(f"负向偏离度极其反常（Z = {z:.2f}）")
-        elif z <= -config["z_threshold"]:
-            urgency += 15.0
-            factors.append(f"负向偏离度达到警戒阈值（Z = {z:.2f}）")
-        elif z <= -1.0:
-            urgency += 8.0
-        elif z >= 2.0:
-            urgency -= 15.0
-
-    if sync_out >= 3:
-        urgency += 20.0
-        factors.append(f"出现 {sync_out} 只核心宽基跨品种同步净赎回共振")
-    elif sync_out >= 2:
-        urgency += 10.0
-        factors.append(f"出现 {sync_out} 只核心宽基同步赎回迹象")
-
-    if top_divergence:
-        urgency += 20.0
-        factors.append(f"量价顶背离：指数上涨 {csi300_pct_chg:.2f}%，资金却大幅撤离逢高派发")
-
-    if flow_5d is not None and flow_5d <= -50.0:
-        urgency += 15.0
-        factors.append(f"近 5 日累计净赎回达 {flow_5d:.1f} 亿元，资金撤离呈持续性")
-
-    if holding_return_pct is not None:
-        if holding_return_pct >= 25.0 and (flow is not None and flow < 0):
-            urgency += 20.0
-            factors.append(f"当前持仓丰厚浮盈（+{holding_return_pct:.1f}%），遇资金净流出应优先落袋为安")
-        elif holding_return_pct >= 10.0 and (flow is not None and flow < 0):
-            urgency += 10.0
-            factors.append(f"当前持仓已有浮盈（+{holding_return_pct:.1f}%），建议防守保护利润")
-
-    urgency = max(0.0, min(100.0, round(urgency, 1)))
-
-    if urgency >= 75.0:
-        action = "STRONG_TAKE_PROFIT"
-        headline = "大额资金集中撤退，赎回压力极大，强烈建议果断获利了结 / 大幅减仓锁定利润"
-        reduction_pct = 70
-    elif urgency >= 50.0:
-        action = "PARTIAL_TAKE_PROFIT"
-        headline = "资金出现明显流出与背离压力，建议分批落袋为安、减仓 30% - 50% 利润"
-        reduction_pct = 40
-    elif urgency >= 35.0:
-        action = "TRAILING_STOP"
-        headline = "短期存在一定分化，建议启动移动止盈，上移出局保护线，不盲目加仓"
-        reduction_pct = 15
-    else:
-        action = "HOLD_SAFE"
-        headline = "宽基资金未见大额撤退抛压，流动性良好，可安心持有"
-        reduction_pct = 0
-
-    redemption_etfs = []
-    for item in snap.get("etfs", []):
-        code = item.get("ts_code")
-        series_item = next((r for r in reversed((snap.get("etf_series") or {}).get(code, [])) if r.get("date") == day), None)
-        if series_item and (series_item.get("flow_yi") or 0) < 0:
-            redemption_etfs.append({
-                "ts_code": code,
-                "name": item.get("name"),
-                "flow_yi": series_item.get("flow_yi"),
-                "z_score": series_item.get("z_score"),
-                "share_change_pct": series_item.get("share_change_pct"),
-            })
-    redemption_etfs.sort(key=lambda x: x.get("flow_yi") or 0)
-
-    trailing_guide = {}
-    if csi300_close:
-        trailing_guide = {
-            "csi300_close": csi300_close,
-            "protective_stop_level": round(csi300_close * 0.99, 2),
-            "hard_exit_level": round(csi300_close * 0.975, 2),
-        }
-
+def _profit_taking_signals(snap: dict, holding_return_pct: float | None = None,
+                           cost_benchmark_level: float | None = None) -> dict:
+    for value in (holding_return_pct, cost_benchmark_level):
+        if value is not None and not math.isfinite(value):
+            raise ToolError("持仓参数须为有限数值")
+    if cost_benchmark_level is not None and cost_benchmark_level <= 0:
+        raise ToolError("指数成本参考值须大于0")
+    brief = _timing_brief(snap)
+    exit_ = brief.get("exit_pressure") or {}
+    usable = brief["decision_state"] != "insufficient_data"
+    action = "EXIT_WATCH" if exit_.get("current_session_usable") else "NEUTRAL_WATCH" if usable else "INSUFFICIENT_DATA"
     return {
-        "schema_version": 1,
-        "context": context,
-        "evaluated_session": day,
-        "profit_taking_action": action,
-        "exit_urgency_score": urgency,
-        "suggested_reduction_pct": reduction_pct,
-        "headline": headline,
-        "top_divergence": top_divergence,
-        "observed_metrics": {
-            "flow_yi": flow,
-            "z_score": z,
-            "sync_out": sync_out,
-            "flow_5d_yi": flow_5d,
-            "csi300_close": csi300_close,
-            "csi300_pct_chg": csi300_pct_chg,
-            "user_holding_return_pct": holding_return_pct,
-            "user_cost_benchmark_level": cost_benchmark_level,
-        },
-        "score_factors": factors,
-        "execution_guide": {
-            "action_guidance": f"建议减仓约 {reduction_pct}% 锁定收益" if reduction_pct > 0 else "维持当前持仓，无需主动减仓",
-            "trailing_stop_reference": trailing_guide,
-            "high_redemption_pressure_etfs": redemption_etfs,
-        },
-        "interpretation": "获利了结信号着重防范大机构/国家队借行情走强实施大额赎回派发。投资决策需结合自身真实买入成本与风险承受力。",
+        "schema_version": 2, "context": brief["context"], "evaluated_session": brief.get("evaluated_session"),
+        "profit_taking_action": action, "decision_state": brief["decision_state"],
+        "exit_urgency_score": None, "suggested_reduction_pct": None,
+        "headline": "集中净赎回条件成立，检查退出与风险预算" if action == "EXIT_WATCH" else "当前未形成完整赎回异动条件" if usable else "数据时效或完整性不足，暂停当前退出判断",
+        "checks": exit_.get("checks", {}), "blocking_reasons": brief.get("blocking_reasons", [brief.get("reason")]),
+        "observed_metrics": brief.get("portfolio"), "csi300": brief.get("csi300"), "top_divergence": None,
+        "user_supplied_scenario": {"holding_return_pct": holding_return_pct, "cost_benchmark_level": cost_benchmark_level,
+                                   "verified": False, "meaning": "用户输入情景，未读取券商真实持仓；指数点位不是具体ETF成本"},
+        "execution_guide": {"suggested_reduction_pct": None, "trailing_stop_reference": {}},
+        "calibration_status": "未回测校准退出收益或紧迫度；无异动不能推出安心持有",
+        "interpretation": "净赎回不能识别国家队卖出；是否获利取决于真实成本、费用和卖出价格，不能从份额推算。",
     }
 
 
 def _fund_pulse_snapshot(snap: dict) -> dict:
-    context = _context(snap)
-    row = snap.get("last_complete") or {}
-    day = row.get("date")
-    csi300 = _benchmark_on(snap, day)
-    spec = _speculation_signals(snap)
-    exit_sig = _profit_taking_signals(snap)
-    flow = row.get("flow_yi")
-    z = row.get("z_score")
-
-    if flow is not None and flow >= 100.0:
-        verdict = "极强资金托底"
-        sentiment = "BULLISH_SUPPORT"
-    elif flow is not None and flow >= 20.0:
-        verdict = "大额资金净流入"
-        sentiment = "BULLISH"
-    elif flow is not None and flow <= -50.0:
-        verdict = "大额资金净赎回预警"
-        sentiment = "BEARISH"
-    elif flow is not None and flow < 0:
-        verdict = "偏弱资金净流出"
-        sentiment = "BEARISH_LEANING"
-    else:
-        verdict = "多空博弈均衡"
-        sentiment = "NEUTRAL"
-
-    key_recommendation = (
-        f"【核心建议】{day} 宽基资金脉搏表现为「{verdict}」（当日净申赎 {flow:+.2f} 亿元，Z-Score {z:+.2f}）。"
-        f"择时信号：{spec.get('headline')}。"
-        f"止盈防守：{exit_sig.get('headline')}。"
-    ) if flow is not None and z is not None else "【核心建议】数据尚待进一步更新，保持观察。"
-
-    return {
-        "schema_version": 1,
-        "context": context,
-        "evaluated_session": day,
-        "pulse_verdict": verdict,
-        "pulse_sentiment": sentiment,
-        "key_recommendation": key_recommendation,
-        "pulse_core_metrics": {
-            "flow_yi": flow,
-            "z_score": z,
-            "sync_in": row.get("sync_in", 0),
-            "sync_out": row.get("sync_out", 0),
-            "flow_5d_yi": row.get("flow_5d_yi"),
-            "flow_20d_yi": row.get("flow_20d_yi"),
-            "csi300_close": csi300.get("close") if csi300 else None,
-            "csi300_pct_chg": csi300.get("pct_chg") if csi300 else None,
-        },
-        "speculation_summary": {
-            "action": spec.get("speculation_action"),
-            "score": spec.get("speculation_score"),
-            "confidence": spec.get("confidence_level"),
-            "suggested_position": spec.get("execution_guide", {}).get("suggested_position"),
-        },
-        "profit_taking_summary": {
-            "action": exit_sig.get("profit_taking_action"),
-            "urgency_score": exit_sig.get("exit_urgency_score"),
-            "suggested_reduction_pct": exit_sig.get("suggested_reduction_pct"),
-        },
-        "divergence_signal": (
-            "底背离：指数下跌但大额资金进场抄底" if spec.get("bottom_divergence") else
-            "顶背离：指数冲高但大额资金减持撤退" if exit_sig.get("top_divergence") else
-            "无显著量价背离"
-        ),
-    }
+    brief = _timing_brief(snap)
+    row = brief.get("portfolio") or {}
+    labels = {"support_watch": "集中净申购观察", "exit_watch": "集中净赎回观察", "divergence": "组合条件分化", "neutral": "未达组合异动门槛", "insufficient_data": "数据不足，暂停当前判断"}
+    return {"schema_version": 2, "context": brief["context"], "evaluated_session": brief.get("evaluated_session"),
+            "decision_state": brief["decision_state"], "pulse_verdict": labels[brief["decision_state"]],
+            "pulse_sentiment": "UNASSESSED", "key_recommendation": "先核对截止日、覆盖率、来源状态和逐项门槛，再结合独立披露与个人风险约束。",
+            "pulse_core_metrics": row, "csi300": brief.get("csi300"),
+            "entry_support": brief.get("entry_support"), "exit_pressure": brief.get("exit_pressure"),
+            "blocking_reasons": brief.get("blocking_reasons", []),
+            "monitoring_coverage": snap.get("monitoring", {}),
+            "independent_evidence": (snap.get("evidence") or [])[:5],
+            "contrary_observations": brief.get("contrary_observations", []),
+            "interpretation": "资金规模、Z值、同步性来自同一ETF数据族，不能视为三项独立的机构身份证据。"}
 
 
 def _csi300_correlation_analysis(snap: dict, limit: int = 60) -> dict:
@@ -706,7 +357,9 @@ def _csi300_correlation_analysis(snap: dict, limit: int = 60) -> dict:
         z = item.get("z_score")
         idx = benchmark.get(d)
         if idx and flow is not None and idx.get("close") is not None:
-            pct = idx.get("pct_chg") or 0.0
+            pct = idx.get("pct_chg")
+            if pct is None or not item.get("complete"):
+                continue
             pairs.append((flow, pct, d, idx.get("close")))
             if flow >= 10.0 and (z or 0) >= 1.5 and pct < -0.5:
                 bottom_div_dates.append({"date": d, "flow_yi": flow, "z_score": z, "csi300_pct_chg": pct})
@@ -731,16 +384,14 @@ def _csi300_correlation_analysis(snap: dict, limit: int = 60) -> dict:
         "sample_sessions": len(pairs),
         "flow_price_correlation": corr,
         "correlation_interpretation": (
-            "正相关：资金随市场上涨申购、下跌赎回（顺势型）" if corr is not None and corr > 0.2 else
-            "负相关：大额资金经常逆市托底抄底或逢高获利了结（逆市平准型）" if corr is not None and corr < -0.2 else
-            "弱相关/低线性相关：资金进出具有较强的主动独立性"
+            "样本内资金估算与同日收益呈正相关；不表示因果或预测能力" if corr is not None and corr > 0.2 else
+            "样本内资金估算与同日收益呈负相关；无法识别机构身份或政策意图" if corr is not None and corr < -0.2 else
+            "样本不足或线性相关较弱；不能据此推断资金动机"
         ),
         "bottom_divergence_events": bottom_div_dates,
         "top_divergence_events": top_div_dates,
-        "strategic_takeaway": (
-            f"在过去 {len(pairs)} 个交易日中，发现了 {len(bottom_div_dates)} 次典型底背离（指数大跌大额逆势抄底）"
-            f"以及 {len(top_div_dates)} 次典型顶背离。底背离日通常对应着中短期的强力政策底或市场情绪底。"
-        ),
+        "strategic_takeaway": "仅计算同日样本相关性，未检验下一期收益、交易成本与样本外表现；不据此判断政策底或顶部。",
+        "predictive_validation": "not_performed",
     }
 
 
@@ -752,20 +403,19 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         title="宽基 ETF 资金异动雷达",
         description="只读本地 ETF 份额、估算净申赎、沪深300行情和量价背离分析，重点为其他 AI 提供择时投机与获利了结决策依据。",
         instructions=(
-            "其他 AI 快速决策指南：\n"
-            "1. 一站式全景快照：调用 get_fund_pulse_snapshot 获取最新资金脉搏、沪深300对比与核心决策摘要；\n"
-            "2. 择时投机/做多：调用 get_speculation_signals 获取 0-100 分量化评分、做多建议 (STRONG_SPECULATIVE_BUY等)、具体建仓仓位及优选 ETF；\n"
-            "3. 获利了结/防守：调用 get_profit_taking_signals 获取出局紧迫度评分、建议减仓比例及移动止盈参考点位；\n"
-            "4. 宏观协同：调用 get_csi300_correlation_analysis 查看资金流与沪深300的相关性及历史背离记录；\n"
-            "5. 基础与深度查询：按需调用 get_market_timing_brief、get_radar_overview、get_daily_series、get_etf_detail 等。"
+            "先读取 get_fund_pulse_snapshot 与 get_market_timing_brief。"
+            "任何当前入场或退出判断必须通过其完整性、时效及逐项阈值检查。"
+            "再用 get_cross_validation 查询官方公告、股东披露与交易辅助线索，用 get_monitoring_coverage 检查接入缺口。"
+            "get_speculation_signals/get_profit_taking_signals 是上述规则的兼容视图，均不输出未校准胜率、仓位或目标价。"
+            "ETF份额、资金金额和同步性同源，不能当作多项独立身份证据。"
         ),
-        version="1.1.0",
+        version="1.2.0",
     )
     cache_file = DATA / "market_data.json"
     evidence_file = ROOT / "evidence.csv"
     cache_lock = threading.RLock()
     last_market_signature: tuple[int, int] | None = None
-    last_evidence_signature: tuple[int, int] | None = None
+    last_evidence_signature: tuple | None = None
     snapshots: dict[tuple, dict] = {}
 
     def read_snapshot(**kwargs: Any) -> dict:
@@ -780,11 +430,14 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
                 except FileNotFoundError as exc:
                     raise ToolError("本地市场数据缓存不存在；请先在雷达界面更新数据") from exc
                 market_signature = (stat.st_mtime_ns, stat.st_size)
-                try:
-                    evidence_stat = evidence_file.stat()
-                    evidence_signature = (evidence_stat.st_mtime_ns, evidence_stat.st_size)
-                except FileNotFoundError:
-                    evidence_signature = None
+                signatures = []
+                for path in (evidence_file, DATA / "evidence.csv", DATA / "disclosures.json", DATA / "crosschecks.json"):
+                    try:
+                        evidence_stat = path.stat()
+                        signatures.append((evidence_stat.st_mtime_ns, evidence_stat.st_size))
+                    except FileNotFoundError:
+                        signatures.append(None)
+                evidence_signature = tuple(signatures)
                 if market_signature != last_market_signature:
                     with radar_store.lock:
                         radar_store.load()
@@ -803,13 +456,13 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
                 return result
         return _snapshot(radar_store, **kwargs)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def list_etf_universe() -> dict[str, Any]:
         """List the fixed monitored broad-index ETF universe; available before the first market-data refresh."""
         return {"schema_version": 1, "etfs": ETF_UNIVERSE,
                 "identity_policy": "名单表示监测范围，不能由 ETF 名单或份额单独确认交易者身份"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_radar_overview(end_date: str | None = None, window: int = 20,
                            z_threshold: float = 2.0, min_flow_yi: float = 10.0,
                            sync_min: int = 3) -> dict[str, Any]:
@@ -817,7 +470,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         return _overview(read_snapshot(end_date=end_date, window=window,
                                    z_threshold=z_threshold, min_flow_yi=min_flow_yi, sync_min=sync_min))
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_market_timing_brief(end_date: str | None = None, window: int = 20,
                                 z_threshold: float = 2.0, min_flow_yi: float = 10.0,
                                 sync_min: int = 3) -> dict[str, Any]:
@@ -825,7 +478,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         return _timing_brief(read_snapshot(end_date=end_date, window=window,
                                        z_threshold=z_threshold, min_flow_yi=min_flow_yi, sync_min=sync_min))
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_daily_series(start_date: str | None = None, end_date: str | None = None,
                          limit: int = 60, offset: int = 0, window: int = 20, z_threshold: float = 2.0,
                          min_flow_yi: float = 10.0, sync_min: int = 3) -> dict[str, Any]:
@@ -848,7 +501,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
                 "next_offset": offset + len(rows) if begin_at > 0 else None,
                 "order": "oldest_to_newest", "units": {"flow_yi": "亿元", "csi300_close": "指数点"}}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_etf_detail(ts_code: str, start_date: str | None = None, end_date: str | None = None,
                        limit: int = 60, offset: int = 0, window: int = 20, z_threshold: float = 2.0,
                        min_flow_yi: float = 10.0, sync_min: int = 3) -> dict[str, Any]:
@@ -872,7 +525,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
                 "total_in_selected_range": len(history), "order": "oldest_to_newest",
                 "units": (snap.get("method") or {}).get("units", {})}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_historical_events(start_date: str | None = None, end_date: str | None = None,
                               limit: int = 50, offset: int = 0, window: int = 20, z_threshold: float = 2.0,
                               min_flow_yi: float = 10.0, sync_min: int = 3) -> dict[str, Any]:
@@ -893,12 +546,40 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
                 "next_offset": offset + len(selected) if offset + len(selected) < len(events) else None,
                 "manual_evidence_policy": "人工录入且未自动核验，不参与资金信号评分"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
+    def get_monitoring_coverage() -> dict[str, Any]:
+        """Read the original monitoring-method checklist: connected, partially covered, unavailable and unimplemented channels, scope and source status. Never assume coverage from a tool name."""
+        snap = read_snapshot()
+        return {"schema_version": 1, "context": _context(snap), "monitoring": snap.get("monitoring", {})}
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
+    def get_cross_validation(channel: str = "official", end_date: str | None = None,
+                             limit: int = 30, offset: int = 0) -> dict[str, Any]:
+        """Read independent official disclosures or auxiliary observations. channel: official, holders, dragon_tiger, block_trades, large_orders. Official publication dates and first-seen times are distinct; max120 rows. No automatic identity score."""
+        if not 1 <= limit <= 120 or not 0 <= offset <= 10000:
+            raise ToolError("limit应为1至120，offset应为0至10000")
+        snap = read_snapshot(end_date=end_date)
+        if channel == "official":
+            rows = [row for row in snap.get("evidence", []) if row.get("verification") == "official_source"]
+            status = {"sources": (snap.get("monitoring") or {}).get("official_sources", {})}
+        else:
+            from .crosschecks import DEFINITIONS, view_crosschecks
+            if channel not in DEFINITIONS:
+                raise ToolError("未知渠道，请先调用get_monitoring_coverage")
+            item = view_crosschecks(min(end_date or snap["as_of"], snap["as_of"])).get("channels", {}).get(channel, {})
+            rows, status = item.get("rows", []), {k: v for k, v in item.items() if k != "rows"}
+        return {"schema_version": 1, "context": _context(snap), "channel": channel, "status": status,
+                "rows": rows[offset:offset + limit], "total": len(rows),
+                "next_offset": offset + limit if offset + limit < len(rows) else None,
+                "affects_score": False, "identity_confirmed": False,
+                "historical_visibility": "按公告日/交易日过滤；首次发现时间单列，未重建历史时点完整可见性"}
+
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_data_quality(end_date: str | None = None) -> dict[str, Any]:
         """Inspect coverage, missing/quarantined ETF rows, source modes/timestamps, stale refresh state, and source documentation. No credentials are returned."""
         return _quality(read_snapshot(end_date=end_date))
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_methodology(end_date: str | None = None, window: int = 20,
                         z_threshold: float = 2.0, min_flow_yi: float = 10.0,
                         sync_min: int = 3) -> dict[str, Any]:
@@ -908,7 +589,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         return {"schema_version": 1, "context": _context(snap), "config": snap.get("config"),
                 "method": snap.get("method"), "sources": snap.get("sources", [])}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_speculation_signals(
         end_date: str | None = None,
         risk_preference: str = "balanced",
@@ -917,13 +598,13 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         min_flow_yi: float = 10.0,
         sync_min: int = 3,
     ) -> dict[str, Any]:
-        """【择时投机重点信号】为其他 AI 产出明确的买入/投机评分 (0-100分)、推荐操作 (STRONG_SPECULATIVE_BUY/SPECULATIVE_BUY/ACCUMULATE/AVOID)、具体建仓仓位建议、量价底背离托底检测、止损与止盈点位参考。"""
+        """入场观察兼容接口：与主择时摘要共用质量门槛；不产出未经回测的评分、胜率、仓位或价格目标。"""
         if risk_preference not in {"aggressive", "balanced", "conservative"}:
             risk_preference = "balanced"
         snap = read_snapshot(end_date=end_date, window=window, z_threshold=z_threshold, min_flow_yi=min_flow_yi, sync_min=sync_min)
         return _speculation_signals(snap, risk_preference=risk_preference)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_profit_taking_signals(
         end_date: str | None = None,
         holding_return_pct: float | None = None,
@@ -933,11 +614,11 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         min_flow_yi: float = 10.0,
         sync_min: int = 3,
     ) -> dict[str, Any]:
-        """【获利了结重点信号】评估宽基资金赎回压力、高位顶背离与撤退风险，给出获利了结紧迫度评分 (0-100分)、明确出局操作 (STRONG_TAKE_PROFIT/PARTIAL_TAKE_PROFIT/TRAILING_STOP/HOLD_SAFE)、建议减仓比例及移动止盈规则。"""
+        """退出观察兼容接口：明确赎回门槛、时效阻断与用户提供情景；未知实际持仓时不推算盈利或减仓比例。"""
         snap = read_snapshot(end_date=end_date, window=window, z_threshold=z_threshold, min_flow_yi=min_flow_yi, sync_min=sync_min)
         return _profit_taking_signals(snap, holding_return_pct=holding_return_pct, cost_benchmark_level=cost_benchmark_level)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_fund_pulse_snapshot(
         end_date: str | None = None,
         window: int = 20,
@@ -949,7 +630,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
         snap = read_snapshot(end_date=end_date, window=window, z_threshold=z_threshold, min_flow_yi=min_flow_yi, sync_min=sync_min)
         return _fund_pulse_snapshot(snap)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False))
     def get_csi300_correlation_analysis(
         limit: int = 60,
         end_date: str | None = None,
@@ -1016,30 +697,13 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
 
     @mcp.prompt()
     def timing_speculation_strategy() -> str:
-        """Prompt to formulate an actionable market speculation strategy based on current fund pulse and CSI 300."""
-        return (
-            "请作为专业量化投资总监，调用 get_speculation_signals 和 get_fund_pulse_snapshot 工具，"
-            "分析最新的宽基 ETF 资金脉搏与沪深300指数价格背景。"
-            "输出一份针对当前市场的【择时投机策略报告】：\n"
-            "1. 资金脉搏当前定性与评分 (0-100)\n"
-            "2. 是否存在量价背离（如指数下跌但大额资金托底抄底）\n"
-            "3. 明确的交易行动指令（强烈做多 / 逢低试探 / 温和定投 / 规避观望）\n"
-            "4. 具体的建仓仓位建议与优选 ETF 标的列表\n"
-            "5. 沪深300指数的关键支撑位、目标止盈位与失效止损线。"
-        )
+        """Evidence-first timing review, with explicit freshness and coverage blockers."""
+        return "先调用 get_market_timing_brief 和 get_monitoring_coverage，再查询 get_cross_validation。报告截止日、数据缺口、逐项门槛、独立披露及反向证据；数据不可用时暂停当前判断。不得把未回测规则当作胜率、给出固定仓位或凭空推算目标价。"
 
     @mcp.prompt()
-    def profit_taking_strategy(user_return_pct: float = 10.0) -> str:
-        """Prompt to formulate an exit and profit-taking strategy for existing holdings."""
-        return (
-            f"请作为专业量化风控专家，假设当前投资者的宽基持仓浮盈约为 {user_return_pct}%。"
-            "调用 get_profit_taking_signals 工具，检查最新的宽基赎回压力与沪深300高位顶背离风险。"
-            "输出一份【获利了结与仓位防守指引】：\n"
-            "1. 当前赎回压力与出局紧迫度评分 (0-100)\n"
-            "2. 是否存在高位顶背离或跨基金集中撤退抛压\n"
-            "3. 明确的了结建议（坚决止盈 / 分批落袋 / 移动止盈 / 安心持有）\n"
-            "4. 建议减仓比例（如减仓 50%）与移动止盈保护点位。"
-        )
+    def profit_taking_strategy(user_return_pct: float | None = None) -> str:
+        """Review exit observations using an optional, explicitly supplied holding scenario."""
+        return f"先核对 get_market_timing_brief 与 get_profit_taking_signals 的阻断项，再用 get_cross_validation 复核。用户提供浮盈情景：{user_return_pct}（None表示未知，未向券商核验）。报告赎回条件、缺失信息与反证，不编造个人盈利、减仓比例或安全持有结论。"
 
     return mcp
 

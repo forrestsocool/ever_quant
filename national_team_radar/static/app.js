@@ -710,11 +710,24 @@
   function renderEvidence() {
     const data = state.snapshot ?? {};
     const evidence = array(data.evidence);
-    $("evidenceStatus").querySelector("p").textContent = evidence.length ? "结合记录的独立披露与基金定期报告，进一步验证资金信号。" : "本地尚未录入独立披露；可结合官方公告与基金定期报告验证。";
+    const monitoring = data.monitoring ?? {};
+    const sources = Object.values(monitoring.official_sources ?? {});
+    const healthy = sources.filter((s) => s.state === "ok").length;
+    $("evidenceStatus").querySelector("p").textContent = sources.length ? `官方公告源 ${healthy} / ${sources.length} 本次可访问 · ${evidence.length} 条截止日前披露。公告不分配当日 ETF 交易额。` : "公告采集尚未运行；未抓取不等于没有增持。";
     $("evidenceList").innerHTML = evidence.slice(0, 5).map((entry) => {
       const url = safeUrl(entry.url);
       const title = esc(entry.title ?? "公开披露");
-      return `<div class="evidence-item"><span class="evidence-type">${esc(entry.kind ?? "披露")}</span>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : `<span>${title}</span>`}<time>${esc(dateString(entry.date))}</time></div>`;
+      const official = entry.verification === "official_source";
+      const details = [entry.excerpt, entry.first_seen_at ? `首次采集：${entry.first_seen_at}；历史回看仅按公告日过滤` : entry.verification].filter(Boolean).join("\n");
+      return `<div class="evidence-item" title="${esc(details)}"><span class="evidence-type">${esc(official ? entry.source_name ?? "官方" : "人工")}</span>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : `<span>${title}</span>`}<time title="公告发布日期">${esc(dateString(entry.date))}</time></div>`;
+    }).join("");
+    const coverageNode = $("monitoringCoverage");
+    const labels = { ok: "已接入", connected: "自动采集", implemented: "已实现", partial: "部分可用", unavailable: "暂不可用", not_fetched: "尚未获取", stale_cache: "旧缓存", not_implemented: "未实现" };
+    if (coverageNode) coverageNode.innerHTML = `<h3>监测手段覆盖</h3><p>状态按真实采集结果更新；辅助线索不自动加分。</p>${array(monitoring.channels).map((c) => `<div class="coverage-method"><div><strong>${esc(c.name)}</strong><span class="coverage-state ${["ok", "connected", "implemented"].includes(c.state) ? "ok" : "warn"}">${esc(labels[c.state] ?? c.state)}</span></div><p>${esc(c.scope ?? "")}</p></div>`).join("")}<details class="source-status"><summary>官方源状态与采集时间</summary>${sources.map((s) => `<p><strong>${esc(s.name)}</strong> · ${esc(labels[s.state] ?? s.state)}<br>${esc(s.checked_at ?? "尚未采集")}${s.error ? ` · ${esc(s.error)}` : ""}</p>`).join("")}</details>`;
+    const crossNode = $("crosscheckObservations");
+    if (crossNode) crossNode.innerHTML = Object.entries(data.crosschecks?.channels ?? {}).map(([key, channel]) => {
+      const detail = (row) => key === "holders" ? `${row.holder_name} · 报告期 ${row.report_period} · ${number(finite(row.hold_amount_shares) ? row.hold_amount_shares / 1e8 : null)} 亿股` : key === "dragon_tiger" ? `${row.seat} · 席位净额 ${number(finite(row.net_buy_yuan) ? row.net_buy_yuan / 1e8 : null, 2, true)} 亿元` : key === "block_trades" ? `成交 ${number(row.amount_yi)} 亿元 · 每笔含买卖双方` : `超大单主动买卖差额 ${number(row.elg_active_difference_yi, 2, true)} 亿元`;
+      return `<details class="crosscheck-channel"><summary>${esc(channel.name)} <span>${esc(labels[channel.state] ?? channel.state)} · ${number(channel.total_records ?? 0, 0)} 条</span></summary><p>${esc(channel.limit)}</p>${array(channel.rows).slice(0, 5).map((row) => `<div class="crosscheck-row"><time>${esc(row.date)}</time><strong>${esc(row.ts_code)}</strong><span>${esc(detail(row))}</span></div>`).join("") || '<p>当前没有可展示记录。来源不可用时不按0处理。</p>'}${array(channel.errors).length ? `<p class="crosscheck-error">${channel.errors.map(esc).join("；")}</p>` : ""}</details>`;
     }).join("");
     const quality = data.quality ?? {};
     const meta = data.metadata ?? {};

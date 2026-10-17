@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f5f6f3">
   <title>国家队异动雷达 · 宽基 ETF 资金监测</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261016-2">
-  <script src="/static/app.js?v=20261016-2" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=20261017-evidence">
+  <script src="/static/app.js?v=20261017-evidence" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
@@ -89,7 +89,7 @@
 
       <div class="lower-grid">
         <section class="panel history-panel" id="history" aria-labelledby="historyTitle"><div class="panel-heading"><div><h2 id="historyTitle">历史信号记录 <span class="section-count" id="alertCount">—</span></h2><p>区分全部达标的异动与多基金同步观察</p></div><button class="text-button" id="showAllAlerts" hidden>查看全部 <span>↗</span></button></div><div id="alertsList" class="alerts-list"><div class="small-empty">当前没有可展示的异动记录</div></div><div class="history-foot">异动代表资金需求异常，归属需要独立证据。</div></section>
-        <section class="panel evidence-panel" aria-labelledby="evidenceTitle"><div class="panel-heading"><div><h2 id="evidenceTitle">独立证据与数据质量</h2><p>用公开披露验证资金信号</p></div><span class="outline-badge">交叉验证</span></div><div class="evidence-status" id="evidenceStatus"><span class="evidence-icon"><svg viewBox="0 0 24 24"><path d="M5 3h11l4 4v14H5zM15 3v5h5M9 12h7M9 16h5"/></svg></span><div><strong>资金信号不能识别买方身份</strong><p>结合中央汇金等官方披露与基金定期报告判断。</p></div></div><div class="evidence-list" id="evidenceList"></div><details class="quality-details" id="qualityDetails"><summary><span><span class="quality-indicator" id="qualityIndicator"></span>数据完整性检查</span><span class="quality-summary" id="qualitySummary">等待数据</span></summary><div id="qualityContent" class="quality-content">尚未载入数据质量信息。</div></details></section>
+        <section class="panel evidence-panel" aria-labelledby="evidenceTitle"><div class="panel-heading"><div><h2 id="evidenceTitle">独立证据与数据质量</h2><p>用公开披露验证资金信号</p></div><span class="outline-badge">交叉验证</span></div><div class="evidence-status" id="evidenceStatus"><span class="evidence-icon"><svg viewBox="0 0 24 24"><path d="M5 3h11l4 4v14H5zM15 3v5h5M9 12h7M9 16h5"/></svg></span><div><strong>资金信号不能识别买方身份</strong><p>结合中央汇金等官方披露与基金定期报告判断。</p></div></div><div class="evidence-list" id="evidenceList"></div><div class="monitoring-coverage" id="monitoringCoverage"></div><div id="crosscheckObservations"></div><details class="quality-details" id="qualityDetails"><summary><span><span class="quality-indicator" id="qualityIndicator"></span>数据完整性检查</span><span class="quality-summary" id="qualitySummary">等待数据</span></summary><div id="qualityContent" class="quality-content">尚未载入数据质量信息。</div></details></section>
       </div>
 
       <section class="method-section" id="method"><details><summary><div class="method-heading"><span class="method-symbol">ƒ</span><div><h2>我们如何识别异动</h2><p>透明的方法，可解释的信号</p></div></div><span class="method-toggle">计算方法与使用边界 <span>＋</span></span></summary><div class="method-content"><div class="formula-box"><span class="formula-label">组合估算净申赎</span><div class="formula">F<sub>t</sub> = Σ (Q<sub>i,t</sub> − Q<sub>i,t−1</sub>) × NAV<sub>i,t−1</sub></div><p>Q 为清算后的基金总份额，NAV 为前一交易日单位净值。按统一单位计算后换算为亿元。</p></div><div class="method-steps"><article><span>01</span><div><h3>份额变化定位真实申赎</h3><p>二级市场买卖只是份额转手。总份额增加反映净申购，也可能源于大额买盘带动的套利申购。</p></div></article><article><span>02</span><div><h3>规模、异常度、同步性共同观察</h3><p id="methodThresholds">对照历史滚动均值与标准差，结合资金规模及多只 ETF 同向变化识别资金异动。历史不足或标准差为零时，Z 值显示为「—」。</p></div></article><article><span>03</span><div><h3>独立披露验证归属</h3><p>宽基净申购不等于国家队买入，净赎回也不能证明国家队卖出。官方公告和定期持仓披露用于验证。</p></div></article></div><div class="method-source" id="methodSource">数据来源：本地 Tushare 认证 · 交易日收盘后披露数据</div></div></details></section>

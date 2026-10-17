@@ -10,4 +10,6 @@ __pycache__/
 *.log
 national_team_radar/data/
 tests/
+data/
+.audit/
 *.csv.bak

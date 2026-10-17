@@ -227,6 +227,11 @@ def _read_cache(key: str) -> tuple[pd.DataFrame, dict]:
                 return pd.DataFrame(), {}
             if frame.duplicated(["trade_date", "ts_code"]).any():
                 return pd.DataFrame(), {}
+            legacy_warnings = " ".join(meta.get("source_warnings", []))
+            if "互联网" in legacy_warnings and "first_seen" not in " ".join(frame["source"].astype(str).unique()):
+                # Older web fallbacks confused volume with turnover and NAV
+                # date with publication date. Do not reuse that cache silently.
+                return pd.DataFrame(), {}
         return frame, meta
     except (OSError, ValueError, TypeError, pd.errors.ParserError):
         return pd.DataFrame(), {}
@@ -342,7 +347,8 @@ def _web_fetch_benchmark(start: str, end: str) -> pd.DataFrame:
     try:
         import requests
         headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        url = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen=300"
+        count = min(2000, max(300, (date.fromisoformat(end) - date.fromisoformat(start)).days + 20))
+        url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=sh000300&scale=240&ma=no&datalen={count}"
         r = requests.get(url, headers=headers, timeout=6)
         if r.status_code == 200 and r.json():
             df = pd.DataFrame(r.json())
@@ -364,13 +370,16 @@ def _web_fetch_etf_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
         code, market = symbol.split(".")
         prefix = "sh" if market.upper() == "SH" else "sz"
         headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=no&datalen=300"
+        count = min(2000, max(300, (date.fromisoformat(end) - date.fromisoformat(start)).days + 20))
+        url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=no&datalen={count}"
         r = requests.get(url, headers=headers, timeout=6)
         if r.status_code == 200 and r.json():
             df = pd.DataFrame(r.json())
             df["trade_date"] = df["day"]
             df["close"] = pd.to_numeric(df["close"], errors="coerce")
-            df["amount"] = pd.to_numeric(df["volume"], errors="coerce") / 1000.0
+            # KLine 'volume' is traded units, not turnover. Never manufacture
+            # CNY turnover from a quantity or from quantity * closing price.
+            df["amount"] = float("nan")
             df["pct_chg"] = df["close"].pct_change() * 100
             df["ts_code"] = symbol
             return _dated(_slice(df, start, end))
@@ -385,7 +394,7 @@ def _web_fetch_etf_nav(symbol: str, start: str, end: str) -> pd.DataFrame:
         import requests
         code = symbol.split(".")[0]
         headers = {"Referer": "http://fund.eastmoney.com/", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        url = f"http://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=120"
+        url = f"https://api.fund.eastmoney.com/f10/lsjz?fundCode={code}&pageIndex=1&pageSize=120"
         r = requests.get(url, headers=headers, timeout=6)
         if r.status_code == 200:
             rows = r.json().get("Data", {}).get("LSJZList", [])
@@ -393,7 +402,9 @@ def _web_fetch_etf_nav(symbol: str, start: str, end: str) -> pd.DataFrame:
                 df = pd.DataFrame(rows)
                 df["trade_date"] = df["FSRQ"]
                 df["nav"] = pd.to_numeric(df["DWJZ"], errors="coerce")
-                df["nav_ann_date"] = df["FSRQ"]
+                # This endpoint exposes valuation date but no publication
+                # timestamp. Only claim that the NAV was visible when fetched.
+                df["nav_ann_date"] = _now()[:10]
                 df["ts_code"] = symbol
                 return _dated(_slice(df, start, end), "trade_date")
     except Exception:
@@ -409,6 +420,8 @@ def _web_fetch_calendar(start: str, end: str) -> pd.DataFrame:
         cal["trade_date"] = pd.to_datetime(cal["trade_date"].astype(str)).dt.strftime("%Y-%m-%d")
         all_dates = pd.date_range(start, end).strftime("%Y-%m-%d").tolist()
         open_set = set(cal["trade_date"])
+        if not open_set or (date.fromisoformat(end) - date.fromisoformat(max(open_set))).days > 3:
+            return pd.DataFrame()  # Do not invent exchange closures beyond known history.
         open_list = sorted([d for d in open_set if d <= end])
         prev_map = {open_list[i]: open_list[i - 1] if i > 0 else open_list[0] for i in range(len(open_list))}
         rows = []
@@ -444,6 +457,7 @@ def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
     # the same record, even when etf_share_size happens to return another NAV.
     need_nav = True
     nav = pd.DataFrame()
+    nav_source, daily_source = "fund_nav", "fund_daily"
     if need_nav:
         try:
             nav = _dated(_fetch_range(client, "fund_nav", start, end, token, ts_code=symbol), "nav_date")
@@ -455,7 +469,8 @@ def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
                 web_nav = _web_fetch_etf_nav(symbol, start, end)
                 if not web_nav.empty:
                     nav = web_nav
-                    warnings.append(f"{symbol} 基金净值使用互联网开源接口备用补全。")
+                    nav_source = "eastmoney_nav_first_seen"
+                    warnings.append(f"{symbol} 净值使用互联网备用源；无原始公告日，按本次获取日期限制历史可见性。")
             except Exception:
                 pass
     daily = pd.DataFrame()
@@ -468,6 +483,7 @@ def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
             web_daily = _web_fetch_etf_daily(symbol, start, end)
             if not web_daily.empty:
                 daily = web_daily
+                daily_source = "sina_web_kline"
                 warnings.append(f"{symbol} 日线行情使用互联网开源接口备用补全。")
         except Exception:
             pass
@@ -495,7 +511,7 @@ def _symbol(client: Any, token: str, symbol: str, start: str, end: str,
                 else:
                     result[col] = values.reindex(result.index)
     result["ts_code"] = symbol
-    result["source"] = "etf_share_size+fund_daily" if not combined.empty else "fund_share+fund_nav+fund_daily"
+    result["source"] = f"etf_share_size+{daily_source}" if not combined.empty else f"fund_share+{nav_source}+{daily_source}"
     result = result.reset_index()
     for col in OBSERVATION_COLUMNS:
         if col not in result:

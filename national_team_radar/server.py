@@ -101,13 +101,14 @@ def parse_dates(start: str | None, end: str | None) -> tuple[str, str]:
 
 
 def load_evidence() -> list[dict]:
-    """Only local, explicitly recorded evidence; never invent corroboration."""
-    path = ROOT / "evidence.csv"
+    """Merge provenance-labelled official collection with optional manual notes."""
+    from .disclosures import load_disclosures
+    result = list(load_disclosures().get("items", []))
+    path = DATA / "evidence.csv" if (DATA / "evidence.csv").exists() else ROOT / "evidence.csv"
     if not path.exists():
-        return []
+        return result
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    result = []
     for row in rows:
         if row.get("date") and row.get("title"):
             try:
@@ -118,6 +119,30 @@ def load_evidence() -> list[dict]:
                 row["url"] = ""
             result.append({k: row.get(k, "") for k in ("date", "title", "url", "kind")})
     return result
+
+
+def refresh_cross_validation(calendar: list[str], finish: str) -> None:
+    from .disclosures import refresh_disclosures
+    from .crosschecks import refresh_crosschecks
+    # Each feed has its own TTL and explicit per-source failures.
+    # An auxiliary endpoint cannot invalidate a usable ETF market snapshot.
+    refresh_disclosures()
+    refresh_crosschecks(calendar, finish)
+
+
+def monitoring_coverage() -> dict:
+    from .disclosures import load_disclosures
+    from .crosschecks import load_crosschecks
+    disclosures = load_disclosures()
+    channels = load_crosschecks().get("channels", {})
+    return {"official_sources": disclosures.get("sources", {}), "announcement_scope": disclosures.get("scope"),
+            "channels": [
+                {"id": "etf_flow", "name": "宽基ETF份额与净申赎", "state": "implemented", "scope": "七只固定宽基；是否可用以同日覆盖率为准"},
+                {"id": "announcements", "name": "官方增减持公告", "state": "partial" if any(s.get("state") != "ok" for s in disclosures.get("sources", {}).values()) else "connected", "scope": "汇金、证金、社保官方栏目；近页扫描，分源报告失败"},
+                *[{"id": key, "name": value.get("name"), "state": value.get("state", "not_fetched"), "scope": value.get("limit"), "checked_at": value.get("checked_at"), "records": value.get("total_records", 0)} for key, value in channels.items()],
+                {"id": "etf_holders", "name": "ETF定期报告持有人归属", "state": "not_implemented", "scope": "尚未自动解析基金年报/半年报前十大持有人；不能把基金投资组合当作ETF持有人"},
+                {"id": "intraday_iopv", "name": "盘中折溢价与IOPV", "state": "not_implemented", "scope": "当前仅有日频收盘价/净值；无盘中IOPV和实时主动买单数据"}],
+            "identity_policy": "市场行为辅助项不自动提高归属置信度；公告仅佐证其披露的机构行为，不能分配当日ETF交易额"}
 
 
 class RadarStore:
@@ -140,6 +165,14 @@ class RadarStore:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             raw["observations"] = pd.DataFrame(raw["observations"])
+            for code, detail in (raw.get("metadata", {}).get("symbols", {})).items():
+                warnings_text = " ".join(detail.get("warnings", []))
+                mask = raw["observations"].get("ts_code", pd.Series(dtype=str)) == code
+                if "日线行情使用互联网" in warnings_text:
+                    raw["observations"].loc[mask, "amount"] = None
+                if "基金净值使用互联网" in warnings_text:
+                    # Legacy cache has no authentic NAV publication timestamp.
+                    raw["observations"].loc[mask, "nav_ann_date"] = str(detail.get("fetched_at") or cn_now().date())[:10]
             if raw["observations"].empty or "trade_date" not in raw["observations"] or not raw.get("calendar"):
                 raise ValueError("快照缺少必要的市场数据")
             if not isinstance(raw.get("metadata"), dict):
@@ -193,6 +226,14 @@ class RadarStore:
             # Validate the candidate before publishing either in memory or on
             # disk. A missing calendar or analysis failure must preserve the
             # previous usable market snapshot.
+            snapshot = self._snapshot_data(result, completed_status)
+            try:
+                with self.lock:
+                    self.state["stage"] = "正在更新官方公告与交易辅助线索…"
+                refresh_cross_validation(result["calendar"], finish)
+            except Exception:
+                # Never discard good ETF data for a failing corroboration feed.
+                pass
             snapshot = self._snapshot_data(result, completed_status)
             raw = {**result, "observations": frame.to_dict(orient="records")}
             atomic_json(DATA / "snapshot.json", snapshot)
@@ -282,7 +323,11 @@ class RadarStore:
             range_warnings.append(f"已排除 {masked_navs} 条在所选截止日之后公告的净值。")
         result.setdefault("quality", {}).setdefault("warnings", []).extend(range_warnings)
         result.update(metadata=metadata, refresh=status, sources=SOURCE_LINKS, benchmark=benchmark[-1] if benchmark else None)
-        result["schedule"] = {"enabled": self.auto_update, "times": ["09:00", "18:30"], "timezone": "Asia/Shanghai", "requires_running": True}
+        result["monitoring"] = monitoring_coverage()
+        from .crosschecks import view_crosschecks
+        cross = view_crosschecks(min(finish, result.get("as_of") or finish))
+        result["crosschecks"] = {**cross, "channels": {key: {**value, "rows": value.get("rows", [])[:20]} for key, value in cross.get("channels", {}).items()}}
+        result["schedule"] = {"enabled": self.auto_update, "times": ["09:00", "18:30", "21:30"], "timezone": "Asia/Shanghai", "requires_running": True}
         return clean_json(result)
 
     def start_scheduler(self) -> None:
@@ -299,7 +344,7 @@ class RadarStore:
     def scheduler_tick(self, now: datetime) -> bool:
         if now.weekday() >= 5:
             return False
-        due = [slot for slot in ("09:00", "18:30") if slot <= now.strftime("%H:%M")]
+        due = [slot for slot in ("09:00", "18:30", "21:30") if slot <= now.strftime("%H:%M")]
         if not due:
             return False
         slot = f"{now.date()} {due[-1]}"
@@ -320,6 +365,12 @@ class RefreshRequest(BaseModel):
 
 def create_app(store: RadarStore | None = None, auto_update: bool = True, initial_refresh: bool = True) -> FastAPI:
     store = store or RadarStore()
+    from .mcp_server import create_mcp_server
+    from mcp.server.transport_security import TransportSecuritySettings
+    mcp_app = create_mcp_server(store).streamable_http_app(
+        stateless_http=True, json_response=True, max_request_body_size=65536,
+        # Host validation is performed by the enclosing HTTP middleware below.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 
     @asynccontextmanager
     async def lifespan(app):
@@ -327,13 +378,16 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
             store.start_scheduler()
         if initial_refresh:
             store.refresh(*store.defaults, force=False)
-        yield
-        store._stop.set()
+        try:
+            async with mcp_app.router.lifespan_context(mcp_app):
+                yield
+        finally:
+            store._stop.set()
 
     app = FastAPI(title="国家队异动雷达", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.radar_store = store
 
-    allowed_env = os.environ.get("ALLOWED_HOSTS", "*").strip()
+    allowed_env = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost,testserver,radar.sensen.li").strip()
     allowed_patterns = {h.strip().lower() for h in allowed_env.split(",") if h.strip()}
 
     @app.middleware("http")
@@ -344,7 +398,8 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
             "*" in allowed_patterns
             or host in {"127.0.0.1", "localhost", "testserver", "["}
             or host in allowed_patterns
-            or any(host.endswith("." + p.lstrip(".")) for p in allowed_patterns if "." in p)
+            or any(host.endswith(p[1:]) and host != p[2:] for p in allowed_patterns if p.startswith("*."))
+            or any(host.endswith(p) for p in allowed_patterns if p.startswith("."))
         )
         if not is_allowed:
             return JSONResponse({"detail": "此雷达仅供本机或允许域名访问"}, status_code=403)
@@ -371,6 +426,14 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
 
     @app.post("/api/refresh")
     def refresh(body: RefreshRequest):
+        with store.lock:
+            recent = store.state.get("last_attempt_at")
+            if recent and not store.state.get("running"):
+                try:
+                    if (cn_now() - datetime.fromisoformat(recent)).total_seconds() < 300:
+                        raise HTTPException(429, "数据刷新间隔至少5分钟，请稍后再试；读取已有数据不受影响。")
+                except (ValueError, TypeError):
+                    pass
         try:
             started = store.refresh(body.start_date, body.end_date)
         except ValueError as exc:
@@ -402,6 +465,7 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
                 writer.writerow(item)
         return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="etf_flow_radar.csv"'})
 
+    app.router.routes.extend(mcp_app.routes)
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
     return app
 

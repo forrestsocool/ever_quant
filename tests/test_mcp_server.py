@@ -56,7 +56,7 @@ def fixture_snapshot(flow: float = 100.0, z: float = 3.0, sync_in: int = 3,
                      "auxiliary": {"benchmark": {"mode": "live", "fetched_at": "2026-10-16T09:00:00+08:00"}},
                      "historical_data_policy": "历史修订未重建"},
         "refresh": {"running": False, "degraded": False, "error": "token=secret",
-                    "updated_at": "2026-10-16T09:00:00+08:00"},
+                    "updated_at": cn_now().isoformat()},
         "sources": [{"title": "Tushare", "url": "https://tushare.pro"}],
         "method": {"formula": "(Q_t-Q_t-1)*NAV_t-1/10000", "units": {"flow_yi": "亿元"}},
         "benchmark": benchmark[-1],
@@ -125,7 +125,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_default_latest_cache_is_not_a_historical_cutoff_on_weekends(self):
         snap = fixture_snapshot()
-        last_exchange_day = (cn_now().date() - timedelta(days=7)).isoformat()
+        last_exchange_day = (cn_now().date() - timedelta(days=2)).isoformat()
         snap["as_of"] = last_exchange_day
         snap["summary"]["date"] = last_exchange_day
         snap["last_complete"]["date"] = last_exchange_day
@@ -231,17 +231,17 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             spec = await client.call_tool("get_speculation_signals", {"risk_preference": "aggressive"})
             self.assertFalse(spec.is_error)
             spec_data = spec.structured_content
-            self.assertEqual(spec_data["speculation_action"], "STRONG_SPECULATIVE_BUY")
-            self.assertGreaterEqual(spec_data["speculation_score"], 80)
-            self.assertIn("建议", spec_data["execution_guide"]["suggested_position"])
-            self.assertTrue(len(spec_data["execution_guide"]["top_target_etfs"]) > 0)
+            self.assertEqual(spec_data["speculation_action"], "INSUFFICIENT_DATA")
+            self.assertIsNone(spec_data["speculation_score"])
+            self.assertIsNone(spec_data["execution_guide"]["suggested_position"])
+            self.assertTrue(spec_data["blocking_reasons"])
 
             # Test fund pulse snapshot
             pulse = await client.call_tool("get_fund_pulse_snapshot", {})
             self.assertFalse(pulse.is_error)
             pulse_data = pulse.structured_content
-            self.assertIn("极强资金托底", pulse_data["pulse_verdict"])
-            self.assertIn("核心建议", pulse_data["key_recommendation"])
+            self.assertEqual(pulse_data["decision_state"], "insufficient_data")
+            self.assertNotIn("托底", pulse_data["pulse_verdict"])
 
             # Test correlation analysis
             corr = await client.call_tool("get_csi300_correlation_analysis", {"limit": 30})
@@ -263,13 +263,51 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
         # Test redemption / profit taking signals
         outflow_snap = fixture_snapshot(flow=-120.0, z=-3.5, sync_in=0, sync_out=3)
+        outflow_snap["refresh"]["error"] = None
         async with Client(create_mcp_server(FakeStore(outflow_snap))) as client:
             exit_result = await client.call_tool("get_profit_taking_signals", {"holding_return_pct": 20.0})
             self.assertFalse(exit_result.is_error)
             exit_data = exit_result.structured_content
-            self.assertIn(exit_data["profit_taking_action"], ("STRONG_TAKE_PROFIT", "PARTIAL_TAKE_PROFIT"))
-            self.assertGreaterEqual(exit_data["exit_urgency_score"], 60)
-            self.assertGreater(exit_data["suggested_reduction_pct"], 0)
+            self.assertEqual(exit_data["profit_taking_action"], "EXIT_WATCH")
+            self.assertIsNone(exit_data["exit_urgency_score"])
+            self.assertIsNone(exit_data["suggested_reduction_pct"])
+
+    async def test_every_decision_view_blocks_stale_or_incomplete_cache(self):
+        for change in ("stale", "incomplete", "baseline", "index"):
+            snap = fixture_snapshot(flow=250, z=6, sync_in=5)
+            snap["refresh"]["error"] = None
+            if change == "stale":
+                snap["refresh"]["updated_at"] = (cn_now() - timedelta(days=8)).isoformat()
+            elif change == "incomplete":
+                snap["quality"]["calendar_latest_session"] = (cn_now().date() + timedelta(days=1)).isoformat()
+            elif change == "baseline":
+                snap["last_complete"]["z_score"] = None
+            else:
+                snap["metadata"]["benchmark"] = []
+            async with Client(create_mcp_server(FakeStore(snap))) as client:
+                for name, field in (("get_market_timing_brief", "decision_state"), ("get_speculation_signals", "speculation_action"),
+                                    ("get_profit_taking_signals", "profit_taking_action"), ("get_fund_pulse_snapshot", "decision_state")):
+                    result = (await client.call_tool(name, {})).structured_content
+                    self.assertEqual(result[field].lower(), "insufficient_data", (change, name))
+
+    async def test_entry_watch_needs_synchrony_and_coverage_tools_are_read_only(self):
+        snap = fixture_snapshot(flow=250, z=6, sync_in=2)
+        snap["refresh"]["error"] = None
+        async with Client(create_mcp_server(FakeStore(snap))) as client:
+            result = (await client.call_tool("get_speculation_signals", {})).structured_content
+            self.assertEqual(result["speculation_action"], "NEUTRAL_WATCH")
+            coverage = await client.call_tool("get_monitoring_coverage", {})
+            self.assertFalse(coverage.is_error)
+            official = await client.call_tool("get_cross_validation", {"channel": "official"})
+            self.assertFalse(official.is_error)
+            invalid = await client.call_tool("get_cross_validation", {"channel": "unsupported"})
+            self.assertTrue(invalid.is_error)
+            self.assertTrue(all(t.annotations.read_only_hint for t in (await client.list_tools()).tools))
+        snap["last_complete"]["sync_in"] = 3
+        async with Client(create_mcp_server(FakeStore(snap))) as client:
+            result = (await client.call_tool("get_speculation_signals", {})).structured_content
+            self.assertEqual(result["speculation_action"], "ENTRY_WATCH")
+            self.assertIsNone(result["speculation_score"])
 
 
 if __name__ == "__main__":

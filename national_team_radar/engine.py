@@ -178,13 +178,17 @@ def _evidence(items: Any, as_of: str | None) -> tuple[list[dict], list[str]]:
         if as_of is None or event_date > as_of:
             warnings.append("已排除晚于数据截止日的佐证线索")
             continue
+        official = item.get("verification") == "official_source" and item.get("source_id") in {"huijin", "csf", "ssf"}
         result.append({
             "date": event_date,
             "title": title,
             "url": url,
             "kind": kind,
-            "source": "manual",
-            "verification": "人工录入，未自动核验原文",
+            "source": item.get("source_id") if official else "manual",
+            "source_name": item.get("source_name") if official else "人工记录",
+            "verification": "official_source" if official else "人工录入，未自动核验原文",
+            **({key: item.get(key) for key in ("publication_date", "first_seen_at", "fetched_at", "entity", "excerpt", "action", "attribution_limit")} if official else {}),
+            "historical_visibility": "仅按公告日期过滤；不代表当时已被本系统抓取",
             "affects_score": False,
         })
     return sorted(result, key=lambda item: (item["date"], item["title"]), reverse=True), warnings
@@ -368,6 +372,11 @@ def analyze(observations: Any, calendar: Iterable[Any], universe: Any = None,
             "sync_observation": None,
         }
         portfolio_series.append(row)
+        for cumulative_window in (5, 20):
+            recent = portfolio_series[-cumulative_window:]
+            row[f"flow_{cumulative_window}d_yi"] = (
+                sum(item["flow_yi"] for item in recent)
+                if len(recent) == cumulative_window and all(item["complete"] for item in recent) else None)
         if status in {"大额净申购异动", "大额净赎回异动"}:
             alerts.append({
                 "date": day, "direction": "in" if flow > 0 else "out",

@@ -22,7 +22,7 @@
    ├── 服务端口: 127.0.0.1:8765:8765
    ├── 挂载卷: /opt/ever_quant/data -> /app/national_team_radar/data
    ├── 环境变量: TUSHARE_TOKEN (读取同目录下的 .env)
-   └── 定时更新: 工作日每日 09:00 与 18:30 自动抓取更新
+   └── 定时更新: 工作日每日 09:00、18:30、21:30 自动抓取更新
 ```
 
 - **服务器操作系统**：Ubuntu 24.04 LTS (Oracle Linux 内核)
@@ -53,9 +53,9 @@
 
 ---
 
-## 三、用户操作（仅需一步：DNS 解析）
+## 三、域名与接口
 
-服务已经在服务器内部监听并健康运行。您只需在域名的 DNS 服务商（如 Cloudflare、腾讯云、阿里云等）处添加一条解析记录：
+域名已接入。DNS 应保持以下解析：
 
 - **主机记录**：`radar`（对应 `radar.sensen.li`）
 - **记录类型**：`A`
@@ -100,6 +100,29 @@ curl -s http://127.0.0.1:8765/api/snapshot | head -c 200
 ```bash
 cd /opt/ever_quant
 git pull
-sudo docker compose restart
+sudo docker compose pull radar
+sudo docker compose up -d --no-deps radar
+sudo docker compose ps
 ```
 所有位于 `/opt/ever_quant/data` 的历史行情与快照缓存将完整保留，无需重新冷启动抓取。
+
+`restart` 只重启现有容器，不会换用新镜像。GitHub Actions 会先执行 Python 和 JavaScript 测试，通过后再构建 amd64/arm64 并发布镜像；Actions 完成不等于服务器已经自动升级。需要执行上述 pull/up 操作。
+
+### 5. 远程 MCP 与辅助数据
+
+只读 Streamable HTTP MCP 地址为 `https://radar.sensen.li/mcp`，与网页同进程运行；所有工具只读缓存，不访问 Tushare 或执行交易。`get_monitoring_coverage` 显示接入范围，`get_cross_validation` 提供公告、股东披露、龙虎榜、大宗交易和超大单。
+
+`data/disclosures.json`、`data/crosschecks.json` 与可选 `data/evidence.csv` 均位于持久化数据卷。官方源不能访问、证书失败或 Tushare 权限不足时会明确显示，不将失败解释为没有事件。
+
+公共网页的手工刷新间隔至少5分钟；Host限制为显式允许域名及本地地址。`ALLOWED_HOSTS` 默认不接受任意域名。镜像只复制雷达运行代码与数据客户端，不包含其他策略和本机数据。
+
+### 6. 发布后验证与回滚
+
+```bash
+curl -fsS https://radar.sensen.li/api/status
+curl -fsS https://radar.sensen.li/api/snapshot -o /tmp/radar-snapshot.json
+docker inspect ever_quant_radar --format '{{.Config.Image}} {{.Image}}'
+docker image inspect ghcr.io/forrestsocool/ever_quant:latest --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+发布前记录现有镜像ID/摘要。回滚时将compose的image改回已验证的sha标签或摘要，再执行`docker compose up -d --no-deps radar`；不要删除持久化数据目录。

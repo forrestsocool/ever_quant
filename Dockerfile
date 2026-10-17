@@ -19,7 +19,9 @@ COPY radar_requirements.txt .
 RUN pip install --no-cache-dir -r radar_requirements.txt
 
 # Copy application files
-COPY . .
+COPY national_team_radar/ ./national_team_radar/
+COPY tushare/sxsc_tushare/ ./tushare/sxsc_tushare/
+COPY run_radar.py run_radar_mcp.py ./
 
 # Ensure data directory exists for volume mount
 RUN mkdir -p /app/national_team_radar/data
