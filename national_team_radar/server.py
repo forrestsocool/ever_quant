@@ -333,12 +333,21 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
     app = FastAPI(title="国家队异动雷达", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.radar_store = store
 
+    allowed_env = os.environ.get("ALLOWED_HOSTS", "*").strip()
+    allowed_patterns = {h.strip().lower() for h in allowed_env.split(",") if h.strip()}
+
     @app.middleware("http")
     async def local_origin_guard(request: Request, call_next):
         # Keep local authenticated refresh endpoints out of cross-site requests.
         host = request.headers.get("host", "").split(":")[0].lower()
-        if host not in {"127.0.0.1", "localhost", "testserver", "["}:
-            return JSONResponse({"detail": "此雷达仅供本机访问"}, status_code=403)
+        is_allowed = (
+            "*" in allowed_patterns
+            or host in {"127.0.0.1", "localhost", "testserver", "["}
+            or host in allowed_patterns
+            or any(host.endswith("." + p.lstrip(".")) for p in allowed_patterns if "." in p)
+        )
+        if not is_allowed:
+            return JSONResponse({"detail": "此雷达仅供本机或允许域名访问"}, status_code=403)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             if origin and origin not in {f"http://{request.headers.get('host')}", f"https://{request.headers.get('host')}"}:

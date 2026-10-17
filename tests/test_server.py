@@ -254,3 +254,22 @@ def test_observation_events_are_trimmed_to_the_selected_view(configured, monkeyp
     monkeypatch.setattr(server, "analyze", analyze)
     snapshot = store.snapshot(start=days[30], end=days[45])
     assert snapshot["observation_events"] == [{"date": days[40]}]
+
+
+def test_allowed_hosts_domain_support(configured, monkeypatch):
+    store, _ = configured
+    # Test wildcard (default)
+    monkeypatch.setenv("ALLOWED_HOSTS", "*")
+    app = server.create_app(store, auto_update=False, initial_refresh=False)
+    with TestClient(app) as client:
+        res = client.get("/api/status", headers={"Host": "radar.sensen.li"})
+        assert res.status_code == 200
+
+    # Test domain whitelist
+    monkeypatch.setenv("ALLOWED_HOSTS", "radar.sensen.li,.sensen.li")
+    app2 = server.create_app(store, auto_update=False, initial_refresh=False)
+    with TestClient(app2) as client:
+        assert client.get("/api/status", headers={"Host": "radar.sensen.li"}).status_code == 200
+        assert client.get("/api/status", headers={"Host": "sub.sensen.li"}).status_code == 200
+        assert client.get("/api/status", headers={"Host": "evil.example.com"}).status_code == 403
+
