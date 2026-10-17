@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 import threading
 from typing import Any
 
@@ -659,7 +659,7 @@ def create_mcp_server(store: RadarStore | None = None) -> MCPServer:
 
     @mcp.resource("radar://speculation")
     def speculation_resource() -> str:
-        """Latest speculation and timing decision with position sizing."""
+        """Latest entry watch with threshold checks and freshness blockers."""
         return json.dumps(_speculation_signals(read_snapshot()), ensure_ascii=False, allow_nan=False)
 
     @mcp.resource("radar://profit-taking")

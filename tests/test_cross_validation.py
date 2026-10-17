@@ -75,6 +75,22 @@ def test_auxiliary_permission_failure_is_unavailable_not_zero(tmp_path, monkeypa
     assert all(c["rows"] == [] and c["errors"] for c in result["channels"].values())
 
 
+def test_auxiliary_cache_preserves_more_than_500_rows_for_mcp_paging(tmp_path, monkeypatch):
+    monkeypatch.setattr(crosschecks, "DATA", tmp_path)
+    monkeypatch.setattr(crosschecks, "_client", lambda: (object(), "", "test"))
+    def request(client, endpoint, token, **kwargs):
+        if endpoint == "top_inst":
+            return pd.DataFrame([{"ts_code": f"{i:06d}.SH", "trade_date": "20261016", "exalter": "机构专用", "net_buy": i} for i in range(600)])
+        return pd.DataFrame()
+    monkeypatch.setattr(crosschecks, "_request", request)
+    result = crosschecks.refresh_crosschecks(["2026-10-16"], "2026-10-17", force=True)
+    channel = result["channels"]["dragon_tiger"]
+    assert channel["total_records"] == 600
+    assert len(channel["rows"]) == 600
+    assert channel["truncated"] is False
+    assert channel["state"] == "ok"
+
+
 def test_sina_volume_is_not_turnover_and_nav_uses_first_observed_date():
     class Response:
         status_code = 200

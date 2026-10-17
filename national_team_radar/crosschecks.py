@@ -84,7 +84,7 @@ def refresh_crosschecks(calendar: list[str], end: str, force: bool = False) -> d
     stocks = [s.strip().upper() for s in os.environ.get("RADAR_STOCK_UNIVERSE", ",".join(DEFAULT_STOCKS)).split(",")]
     stocks = list(dict.fromkeys(s for s in stocks if re.fullmatch(r"\d{6}\.(SH|SZ)", s)))[:30]
     try:
-        if not force and cached.get("requested_end") == end and now - datetime.fromisoformat(cached["checked_at"]) < timedelta(hours=2):
+        if not force and cached.get("schema_version") == 2 and cached.get("requested_end") == end and now - datetime.fromisoformat(cached["checked_at"]) < timedelta(hours=2):
             return cached
     except (KeyError, ValueError, TypeError):
         pass
@@ -124,16 +124,17 @@ def refresh_crosschecks(calendar: list[str], end: str, force: bool = False) -> d
         records = sorted(unique.values(), key=lambda r: (r["date"], r.get("amount_yi") or 0), reverse=True)
         old = (cached.get("channels") or {}).get(key, {})
         stale = bool(errors and not records and old.get("rows"))
-        return key, {**definition, "state": "stale_cache" if stale else "partial" if errors and completed else "unavailable" if errors else "ok" if queries else "not_fetched",
+        truncated = len(records) > 10000
+        return key, {**definition, "state": "stale_cache" if stale else "partial" if (errors and completed) or truncated else "unavailable" if errors else "ok" if queries else "not_fetched",
                      "checked_at": stamp, "data_fetched_at": old.get("data_fetched_at") if stale else stamp,
                      "sample_stocks": stocks if key in {"holders", "large_orders"} else None,
                      "sessions": sessions, "completed_queries": completed, "errors": errors[:5],
                      "total_records": len(records) if not stale else old.get("total_records", len(old.get("rows", []))),
-                     "rows": old.get("rows", []) if stale else records[:500],
-                     "truncated": len(records) > 500, "identity_confirmed": False}
+                     "rows": old.get("rows", []) if stale else records[:10000],
+                     "truncated": old.get("truncated", False) if stale else truncated, "identity_confirmed": False}
     with ThreadPoolExecutor(max_workers=4) as pool:
         channels = dict(pool.map(collect, DEFINITIONS))
-    result = {"checked_at": stamp, "requested_end": end, "channels": channels,
+    result = {"schema_version": 2, "checked_at": stamp, "requested_end": end, "channels": channels,
               "policy": "辅助渠道不自动加分；公告日期早于截止日才可用；当前源修订未重建历史可见性"}
     atomic_json(DATA / "crosschecks.json", result)
     return result
