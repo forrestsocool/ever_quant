@@ -79,3 +79,29 @@ body{font-size:14px;line-height:1.7}.topbar{height:49px}.topbar,.breadcrumb,.bre
 .flow-panel .panel-heading>div:first-child{min-width:0;flex:1 1 280px}
 .flow-panel .segmented-control{max-width:100%;flex-shrink:0;flex-wrap:wrap}
 #historySummary{line-height:1.7;color:var(--muted,#69716a)}
+
+/* One persistent date cursor; the chart geometry stays untouched while scrubbing. */
+#mainChart{touch-action:pan-y;user-select:none;cursor:crosshair;contain:layout style}
+#mainChart:focus-visible{outline:2px solid #78976d;outline-offset:2px;border-radius:4px}
+#mainChart.scrubbing{cursor:grabbing}
+.pulse-hit-area{fill:transparent;pointer-events:all}
+.pulse-cursor{pointer-events:none;will-change:transform}
+.cursor-line{stroke:#526e47;stroke-width:1.4;stroke-dasharray:4 3;vector-effect:non-scaling-stroke}
+.cursor-handle{fill:#526e47;stroke:#fff;stroke-width:2}
+.date-selection-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:7px 15px;padding:14px 25px 2px}
+.date-selector{display:flex;align-items:center;gap:7px;color:#536b48;font-size:12px}
+.selection-label{color:#7a8971;margin-right:4px}
+.date-selector time{font:600 14px var(--numbers);min-width:94px;text-align:center;color:#405b36}
+.date-selector button{border:1px solid #dbe3d3;background:#f9fbf5;color:#526e47;border-radius:4px;min-width:30px;min-height:30px;padding:2px 7px;cursor:pointer;font-size:20px;line-height:1}
+.date-selector button:hover:not(:disabled){background:#eaf1e1;border-color:#9daf8f}
+.date-selector button:focus-visible{outline:2px solid #78976d;outline-offset:2px}
+.date-selector button:disabled{opacity:.4;cursor:default}
+.date-selector .return-latest{font-size:11px;margin-left:5px;padding:4px 9px}
+.selection-context{font-size:11px;color:#7b8b71}
+.history-load-row{display:flex;align-items:center;gap:12px;padding:0 25px 10px;min-height:25px}
+.history-load-status{font-size:11px;color:#819174}
+.history-load-status.error{color:#9b6739}
+.history-load-row .text-button{font-size:11px}
+.chart-tooltip{box-sizing:border-box;width:230px;pointer-events:none;contain:layout style}
+@media(max-width:760px){.date-selection-bar{padding:12px 17px 2px}.selection-context{flex-basis:100%}.history-load-row{padding-left:17px;padding-right:17px}.date-selector{gap:5px}.selection-label{font-size:11px}}
+@media(max-width:480px){.date-selection-bar{padding-left:13px;padding-right:13px}.date-selector time{min-width:84px;font-size:13px}.date-selector .return-latest{margin-left:0;padding-left:6px;padding-right:6px}.date-selector button{min-width:27px}.selection-label{margin-right:0}}

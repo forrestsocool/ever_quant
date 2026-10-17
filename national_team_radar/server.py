@@ -6,6 +6,7 @@ raw-data caches; this module only persists market data and analytical results.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 from copy import deepcopy
 import csv
 import io
@@ -14,6 +15,7 @@ import math
 import os
 import threading
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 from .engine import analyze
@@ -274,17 +277,19 @@ class RadarStore:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def snapshot(self, config: dict | None = None, start: str | None = None, end: str | None = None) -> dict:
+    def snapshot(self, config: dict | None = None, start: str | None = None, end: str | None = None,
+                 *, crosscheck_limit: int | None = 20) -> dict:
         with self.lock:
             if self.data is None:
                 raise ValueError("还没有本地数据。点击“更新数据”，读取本地 Tushare 认证后获取真实数据。")
             data = self.data
             status = dict(self.state)
-        return self._snapshot_data(data, status, config, start, end)
+        return self._snapshot_data(data, status, config, start, end, crosscheck_limit=crosscheck_limit)
 
     def _snapshot_data(self, data: dict, status: dict, config: dict | None = None,
-                       start: str | None = None, end: str | None = None) -> dict:
-        frame = data["observations"].copy()
+                       start: str | None = None, end: str | None = None,
+                       *, crosscheck_limit: int | None = 20) -> dict:
+        frame = data["observations"]
         calendar = data["calendar"][:]
         metadata = deepcopy(data["metadata"])
         if not calendar:
@@ -292,7 +297,9 @@ class RadarStore:
         begin, finish = parse_dates(start or (metadata.get("requested_start_date") if self._explicit_range else self.defaults[0]), end or (metadata.get("requested_end_date") if self._explicit_range else self.defaults[1]))
         # Retain pre-range data as warmup, then trim output. Indicators never use
         # observations after the selected end date, avoiding historical lookahead.
-        frame = frame.loc[frame["trade_date"].astype(str) <= finish]
+        analysis_begin = max(EARLIEST_DATA_DATE, (date.fromisoformat(begin) - timedelta(days=270)).isoformat())
+        dates = frame["trade_date"].astype(str)
+        frame = frame.loc[(dates >= analysis_begin) & (dates <= finish)].copy()
         # NAV dates identify the valuation day, not the disclosure day. A
         # historical cutoff must not borrow a NAV announced after that cutoff.
         masked_navs = 0
@@ -301,7 +308,7 @@ class RadarStore:
             not_yet_announced = ann_dates.notna() & (ann_dates > finish)
             masked_navs = int((not_yet_announced & frame["nav"].notna()).sum())
             frame.loc[not_yet_announced, "nav"] = None
-        calendar = [day for day in calendar if day <= finish]
+        calendar = [day for day in calendar if analysis_begin <= day <= finish]
         result = analyze(frame, calendar, ETF_UNIVERSE, config={**DEFAULTS, **(config or {})}, evidence=load_evidence())
         if not result.get("as_of") or result["as_of"] < begin:
             raise ValueError("所选区间没有已披露的份额数据，请调整日期或点击更新获取该区间。")
@@ -342,7 +349,7 @@ class RadarStore:
         result["monitoring"] = monitoring_coverage()
         from .crosschecks import view_crosschecks
         cross = view_crosschecks(min(finish, result.get("as_of") or finish))
-        result["crosschecks"] = {**cross, "channels": {key: {**value, "rows": value.get("rows", [])[:20]} for key, value in cross.get("channels", {}).items()}}
+        result["crosschecks"] = {**cross, "channels": {key: {**value, "rows": value.get("rows", [])[:crosscheck_limit]} for key, value in cross.get("channels", {}).items()}}
         result["schedule"] = {"enabled": self.auto_update, "times": ["09:00", "18:30", "21:30"], "timezone": "Asia/Shanghai", "requires_running": True}
         return clean_json(result)
 
@@ -402,6 +409,10 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
 
     app = FastAPI(title="国家队异动雷达", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.radar_store = store
+    # Compress JSON (including the background history); SSE is excluded by Starlette.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=4)
+    dashboard_cache: OrderedDict = OrderedDict()
+    dashboard_lock = threading.Lock()
 
     allowed_env = os.environ.get("ALLOWED_HOSTS", "127.0.0.1,localhost,testserver,radar.sensen.li").strip()
     allowed_patterns = {h.strip().lower() for h in allowed_env.split(",") if h.strip()}
@@ -463,9 +474,43 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
         except ValueError as exc:
             raise HTTPException(503 if store.data is None else 422, str(exc)) from exc
 
-    @app.get("/api/export.csv")
-    def export(window: int = Query(20, ge=5, le=120), z_threshold: float = Query(2.0, ge=0.5, le=10), min_flow_yi: float = Query(10, gt=0, le=10000), sync_min: int = Query(3, ge=1, le=7), start_date: str | None = None, end_date: str | None = None):
+    @app.get("/api/dashboard")
+    def dashboard(scope: str = Query("year", pattern="^(year|all|custom)$"), window: int = Query(20, ge=5, le=120), z_threshold: float = Query(2.0, ge=0.5, le=10), min_flow_yi: float = Query(10, gt=0, le=10000), sync_min: int = Query(3, ge=1, le=7), start_date: str | None = None, end_date: str | None = None):
+        """Small initial view, then a lossless columnar history for local scrubbing."""
         try:
+            begin, finish = parse_dates(start_date, end_date)
+            if scope == "year":
+                # Include extra sessions for the first visible day's mini charts.
+                begin = max(begin, (date.fromisoformat(finish) - timedelta(days=410)).isoformat())
+            params = {"window": window, "z_threshold": z_threshold, "min_flow_yi": min_flow_yi, "sync_min": sync_min}
+            with store.lock:
+                revision = (id(store.data), json.dumps(store.state, sort_keys=True), store.auto_update)
+            key = (revision, begin, finish, tuple(params.values()), scope)
+            # Coalesce duplicate requests and bound memory across parameter edits.
+            with dashboard_lock:
+                cached = dashboard_cache.get(key)
+                if cached and time.monotonic() - cached[0] < 30:
+                    dashboard_cache.move_to_end(key)
+                    return Response(cached[1], media_type="application/json", headers={"Cache-Control": "no-cache"})
+                result = store.snapshot(params, begin, finish, crosscheck_limit=None)
+                from .dashboard import pack_dashboard
+                body = json.dumps(pack_dashboard(result, scope), ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+                dashboard_cache[key] = (time.monotonic(), body)
+                dashboard_cache.move_to_end(key)
+                while len(dashboard_cache) > 4:
+                    dashboard_cache.popitem(last=False)
+            return Response(body, media_type="application/json", headers={"Cache-Control": "no-cache"})
+        except ValueError as exc:
+            raise HTTPException(503 if store.data is None else 422, str(exc)) from exc
+
+    @app.get("/api/export.csv")
+    def export(window: int = Query(20, ge=5, le=120), z_threshold: float = Query(2.0, ge=0.5, le=10), min_flow_yi: float = Query(10, gt=0, le=10000), sync_min: int = Query(3, ge=1, le=7), start_date: str | None = None, end_date: str | None = None, review_date: str | None = None):
+        try:
+            if review_date:
+                begin, finish = parse_dates(start_date, end_date)
+                review_date = date.fromisoformat(review_date).isoformat()
+                if not begin <= review_date <= finish:
+                    raise ValueError("回看日期应在导出区间内")
             snapshot = store.snapshot({"window": window, "z_threshold": z_threshold, "min_flow_yi": min_flow_yi, "sync_min": sync_min}, start=start_date, end=end_date)
         except ValueError as exc:
             raise HTTPException(503 if store.data is None else 422, str(exc)) from exc
@@ -475,6 +520,10 @@ def create_app(store: RadarStore | None = None, auto_update: bool = True, initia
         writer.writeheader()
         for code, rows in snapshot.get("etf_series", {}).items():
             for row in rows:
+                # Match local cursor review: use this disclosure version, then
+                # trim dates, rather than hiding later-announced historical NAVs.
+                if review_date and row["date"] > review_date:
+                    continue
                 item = {**row, "ts_code": code}
                 if isinstance(item.get("quality"), (list, dict)):
                     item["quality"] = json.dumps(item["quality"], ensure_ascii=False)

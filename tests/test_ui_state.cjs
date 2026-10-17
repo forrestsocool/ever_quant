@@ -73,7 +73,7 @@ function harness(handler) {
   const history = [];
   const location = { pathname: "/", search: "", hash: "#overview" };
   const sandbox = {
-    document, URL, URLSearchParams, Intl,
+    document, URL, URLSearchParams, Intl, RadarTimeline: require("../national_team_radar/static/timeline.js"),
     window: {
       location, innerWidth: 1200, innerHeight: 800, addEventListener() {},
       history: { replaceState(_state, _title, url) { history.push(url); } },
@@ -87,7 +87,7 @@ function harness(handler) {
     },
   };
   const source = fs.readFileSync(controllerPath, "utf8");
-  const injected = source.replace(/  init\(\);\s*\}\)\(\);\s*$/, "  globalThis.controller = { state, loadSnapshot, pollStatus, syncDateInputs };\n})();");
+  const injected = source.replace(/  init\(\);\s*\}\)\(\);\s*$/, "  globalThis.controller = { state, loadSnapshot, pollStatus, syncDateInputs, loadHistory, selectTradingDate, installDataset };\n})();");
   assert.notEqual(injected, source, "controller initialization seam must match app.js");
   vm.createContext(sandbox);
   vm.runInContext(injected, sandbox, { filename: controllerPath });
@@ -99,7 +99,7 @@ function harness(handler) {
   state.latestSnapshot = fixture("2026-10-15", { complete: false, lastComplete: "2026-10-14" });
   state.loaded = true;
   syncDateInputs(state.snapshot);
-  return { state, loadSnapshot, pollStatus, get, requests, history };
+  return { state, loadSnapshot, pollStatus, get, requests, history, ...sandbox.controller };
 }
 
 test("failed query preserves the displayed dates, thresholds, data and export", async () => {
@@ -252,4 +252,105 @@ test("complete mode migrates old bookmarks to the common pool start while custom
   await ui.loadSnapshot({ mode: "custom", params: candidate });
   assert.match(ui.requests.at(-1).url, /start_date=2020-01-01/);
   assert.equal(ui.state.params.start_date, "2020-01-01");
+});
+
+function timelineFixture(dates) {
+  const snapshot = fixture(dates.at(-1));
+  snapshot.series = dates.map((date, i) => ({ date, complete: true, flow_yi: i + 1, valid_count: 1, total_count: 1, z_score: .5, status: "观察", sync_in: 0, sync_out: 0 }));
+  snapshot.summary = snapshot.series.at(-1);
+  snapshot.etfs = [{ ts_code: "510300.SH", name: "ETF" }];
+  snapshot.etf_series = { "510300.SH": snapshot.series.map((row) => ({ ...row, valid: true, total_share_yi: 10 })) };
+  return snapshot;
+}
+
+test("recent data becomes usable before full history; background completion retains the selected day", async () => {
+  const older = deferred();
+  const recentDates = ["2026-10-14", "2026-10-15", "2026-10-16"];
+  const ui = harness(async (url) => url.searchParams.get("scope") === "all" ? older.promise : timelineFixture(recentDates));
+  ui.state.progressive = true; ui.state.latestSnapshot = null;
+  ui.state.config.history_start_date = "2016-11-04";
+  assert.equal(await ui.loadSnapshot({ mode: "latest" }), true);
+  assert.equal(ui.requests.length, 1);
+  assert.match(ui.requests[0].url, /^\/api\/dashboard\?/);
+  assert.match(ui.requests[0].url, /scope=year/);
+  assert.equal(ui.state.selectedDate, "2026-10-16");
+  assert.equal(ui.state.loading, false);
+  assert.equal(ui.state.historyReady, false);
+  const background = ui.loadHistory();
+  assert.equal(ui.state.historyLoading, true);
+  assert.equal(ui.selectTradingDate("2026-10-15"), true);
+  const requestCount = ui.requests.length;
+  older.resolve(timelineFixture(["2016-11-04", ...recentDates]));
+  await background;
+  assert.equal(ui.state.historyReady, true);
+  assert.equal(ui.state.historyLoading, false);
+  assert.equal(ui.state.dataset.series.length, 4);
+  assert.equal(ui.state.selectedDate, "2026-10-15");
+  assert.equal(ui.state.snapshot.as_of, "2026-10-15");
+  assert.equal(ui.state.params.start_date, "2016-11-04");
+  ui.selectTradingDate("2026-10-14");
+  assert.equal(ui.requests.length, requestCount, "date selection must never fetch");
+});
+
+test("background history defers its commit during pointer capture and ignores obsolete responses", async () => {
+  const response = deferred();
+  const ui = harness(async () => response.promise);
+  ui.state.progressive = true;
+  ui.installDataset(timelineFixture(["2026-10-14", "2026-10-15"]));
+  const current = ui.state.dataset;
+  ui.state.dragging = true;
+  const loading = ui.loadHistory();
+  response.resolve(timelineFixture(["2016-11-04", "2026-10-14", "2026-10-15"]));
+  await loading;
+  assert.equal(ui.state.dataset, current);
+  assert.equal(typeof ui.state.pendingHistory, "function");
+  ui.state.requestId += 1;
+  ui.state.pendingHistory();
+  assert.equal(ui.state.dataset, current, "an older request cannot overwrite a newer view");
+});
+
+test("failed background history preserves the working recent data and provides a retry", async () => {
+  const ui = harness(async () => ({ httpError: 503, message: "history temporarily unavailable" }));
+  ui.state.progressive = true;
+  ui.installDataset(timelineFixture(["2026-10-14", "2026-10-15"]));
+  const original = ui.state.dataset;
+  await ui.loadHistory();
+  assert.equal(ui.state.dataset, original);
+  assert.equal(ui.state.historyLoading, false);
+  assert.match(ui.state.historyError, /history temporarily unavailable/);
+  assert.equal(ui.get("historyRetry").hidden, false);
+});
+
+test("quiet refresh keeps an old cursor date and cannot overwrite a selection changed in flight", async () => {
+  const response = deferred();
+  const dates = ["2016-11-04", "2026-10-14", "2026-10-16"];
+  const ui = harness(async () => response.promise);
+  ui.state.progressive = true; ui.state.historyReady = true; ui.state.mode = "latest";
+  ui.installDataset(timelineFixture(dates));
+  ui.selectTradingDate("2016-11-04");
+  const loading = ui.loadSnapshot({ quiet: true });
+  assert.match(ui.requests[0].url, /scope=all/);
+  ui.selectTradingDate("2026-10-14");
+  response.resolve(timelineFixture(dates));
+  await loading;
+  assert.equal(ui.state.selectedDate, "2026-10-14");
+  assert.equal(ui.state.historyReady, true);
+});
+
+test("quiet refresh waits for an active drag to finish before installing data", async () => {
+  const response = deferred();
+  const dates = ["2026-10-14", "2026-10-15", "2026-10-16"];
+  const ui = harness(async () => response.promise);
+  ui.installDataset(timelineFixture(dates)); ui.state.mode = "latest";
+  const original = ui.state.dataset;
+  ui.state.dragging = true;
+  const loading = ui.loadSnapshot({ quiet: true });
+  response.resolve(timelineFixture(dates));
+  await new Promise(setImmediate);
+  assert.equal(ui.state.dataset, original);
+  assert.equal(ui.state.dragWaiters.length, 1);
+  ui.state.dragging = false;
+  ui.state.dragWaiters.splice(0).forEach((resolve) => resolve());
+  await loading;
+  assert.notEqual(ui.state.dataset, original);
 });

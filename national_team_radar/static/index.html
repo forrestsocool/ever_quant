@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f5f6f3">
   <title>国家队异动雷达 · 宽基 ETF 资金监测</title>
-  <link rel="stylesheet" href="/static/style.css?v=20261017-history">
-  <script src="/static/app.js?v=20261017-history" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=20261017-scrub">
+  <script src="/static/timeline.js?v=20261017-scrub" defer></script>
+  <script src="/static/app.js?v=20261017-scrub" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
@@ -37,11 +38,11 @@
         </div>
 
         <div class="view-toolbar">
-          <div class="view-mode-tabs" id="viewModeControls" aria-label="选择数据视图"><button data-view="complete" class="active" aria-pressed="true">最近完整日</button><button data-view="latest" aria-pressed="false">最新披露</button><button data-view="custom" aria-pressed="false" aria-expanded="false">自选日期</button></div>
+          <div class="view-mode-tabs" id="viewModeControls" aria-label="选择数据视图"><button data-view="complete" aria-pressed="false">最近完整日</button><button data-view="latest" class="active" aria-pressed="true">最新披露</button><button data-view="custom" aria-pressed="false" aria-expanded="false">自选日期</button></div>
           <div class="latest-progress" id="latestProgress" aria-live="polite"><span class="mini-dot"></span><span>正在读取最新披露进度</span></div>
         </div>
         <div class="toolbar">
-          <div class="view-context" id="viewContext" aria-live="polite">正在读取最近完整交易日…</div>
+          <div class="view-context" id="viewContext" aria-live="polite">正在读取最新交易日…</div>
           <div class="toolbar-actions"><a class="button button-outline" id="exportButton" href="/api/export.csv" download aria-disabled="true"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 16v5h16v-5"/></svg><span>导出当前视图</span></a><button class="button button-primary" id="refreshButton" title="更新最新数据，保留当前选定的历史视图"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 11.8-1L20 9M4 15l2.2 3A7 7 0 0 0 18 17"/></svg><span>更新真实数据</span></button></div>
         </div>
         <div class="custom-date-editor" id="customDateEditor" hidden><div class="date-controls"><span class="toolbar-label">观察区间</span><label class="sr-only" for="startDate">开始日期</label><input id="startDate" type="date" aria-label="开始日期"><span class="date-separator">—</span><label class="sr-only" for="endDate">结束日期</label><input id="endDate" type="date" aria-label="结束日期"><button class="button button-subtle" id="dateApply">应用区间</button></div><span id="dateDraftNote">点击应用后切换；图表与导出以已展示区间为准。</span></div>
@@ -74,9 +75,14 @@
         </div>
 
         <section class="panel flow-panel" aria-labelledby="flowChartTitle">
-          <div class="panel-heading"><div><h2 id="flowChartTitle">宽基资金脉搏 <span class="section-count" id="chartDays">日频</span></h2><p id="historySummary">从七只 ETF 全部上市起持续记录历史资金脉搏</p></div><div class="segmented-control" id="rangeControls" aria-label="图表显示交易日"><button data-range="20">20 日</button><button data-range="60">60 日</button><button data-range="120">120 日</button><button data-range="252">1 年</button><button data-range="1260">5 年</button><button data-range="all" class="active" aria-pressed="true">全部</button></div></div>
+          <div class="panel-heading"><div><h2 id="flowChartTitle">宽基资金脉搏 <span class="section-count" id="chartDays">日频</span></h2><p id="historySummary">从七只 ETF 全部上市起持续记录历史资金脉搏</p></div><div class="segmented-control" id="rangeControls" aria-label="图表显示交易日"><button data-range="20">20 日</button><button data-range="60">60 日</button><button data-range="120">120 日</button><button data-range="252" class="active" aria-pressed="true">1 年</button><button data-range="1260">5 年</button><button data-range="all" aria-pressed="false">全部</button></div></div>
           <div class="chart-meta"><div class="chart-legend"><span><i class="legend-bar positive"></i>净申购</span><span><i class="legend-bar negative"></i>净赎回</span><span><i class="legend-line"></i>Z 异常度</span><span class="threshold-legend"><i class="legend-dashed"></i>异动阈值</span></div><button type="button" class="index-toggle" id="indexToggle" aria-pressed="true" aria-label="显示沪深300指数曲线"><i class="legend-index"></i><span>沪深300指数</span><span class="index-toggle-state" id="indexToggleState">显示中</span></button></div>
+          <div class="date-selection-bar">
+            <div class="date-selector"><span class="selection-label">观察交易日</span><button type="button" id="previousTradeDate" aria-label="上一个交易日" title="上一个交易日" disabled>‹</button><time id="selectedTradeDate">—</time><button type="button" id="nextTradeDate" aria-label="下一个交易日" title="下一个交易日" disabled>›</button><button type="button" class="return-latest" id="returnLatestDate" disabled>回到最新</button></div>
+            <span id="selectionContext" class="selection-context">拖动竖线或使用方向键，全页数据联动</span>
+          </div>
           <div class="chart-container" id="mainChart" aria-label="每日估算净申赎、沪深300指数及 Z 异常度图表"><div class="chart-empty"><div class="empty-orbit"></div><strong>等待真实资金数据</strong><p>点击「更新真实数据」开始监测观察池</p></div></div>
+          <div class="history-load-row"><span id="historyLoadStatus" class="history-load-status" aria-live="polite">正在优先加载近一年…</span><button type="button" class="text-button" id="historyRetry" hidden>重试完整历史 ↗</button></div>
           <div class="chart-foot"><span id="chartFootText"><i class="foot-dot"></i>左轴为估算净申赎（亿元），右轴为沪深300（点）；底部为 Z 异常度。缺失值留空。</span><button class="text-button" id="chartSettings">调整监测参数 <span>↗</span></button></div>
         </section>
       </section>

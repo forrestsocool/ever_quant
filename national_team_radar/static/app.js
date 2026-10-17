@@ -4,21 +4,29 @@
   const $ = (id) => document.getElementById(id);
   const DEFAULTS = { window: 20, z_threshold: 2, min_flow_yi: 10, sync_min: 3 };
   const state = {
-    snapshot: null, config: {}, params: { ...DEFAULTS }, range: "all", indexVisible: true,
+    snapshot: null, config: {}, params: { ...DEFAULTS }, range: "252", indexVisible: true,
     search: "", index: "all", sort: "flow_yi", sortDirection: -1,
     refreshing: false, polling: null, requestId: 0, selectedEtf: null,
     drawerMode: "flow", alertsExpanded: false, loaded: false, previousFocus: null,
-    mode: "complete", latestSnapshot: null, baseStart: null, loading: false,
+    mode: "latest", latestSnapshot: null, baseStart: null, loading: false,
     dateEditorOpen: false, dateDraftDirty: false, statusInitialized: false, lastSeenUpdate: null,
     pendingServerUpdate: false, lastStatusError: null, newDataAt: null, statusBusy: false, refreshEpoch: 0,
+    dataset: null, timeline: null, selectedDate: null, restoreDate: null, progressive: false,
+    historyLoading: false, historyReady: false, historyError: null, historyEpoch: 0,
+    dragging: false, cursorFrame: null, chartController: null, pendingHistory: null,
+    dragWaiters: [],
   };
+  const preparedSnapshots = new WeakMap();
+  const numberFormats = new Map();
+  const updatedFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   const finite = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
   const num = (value) => finite(value) ? Number(value) : null;
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
   const number = (value, decimals = 2, sign = false) => {
     if (!finite(value)) return "—";
     const n = Number(value);
-    return `${sign && n > 0 ? "+" : ""}${n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+    if (!numberFormats.has(decimals)) numberFormats.set(decimals, new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }));
+    return `${sign && n > 0 ? "+" : ""}${numberFormats.get(decimals).format(n)}`;
   };
   const colorClass = (value) => !finite(value) || Number(value) === 0 ? "neutral-text" : Number(value) > 0 ? "positive-text" : "negative-text";
   const codeOf = (etf) => String(etf.ts_code ?? etf.code ?? "");
@@ -49,6 +57,113 @@
     return data;
   }
 
+  let dataWorker = null; let workerSequence = 0;
+  const workerRequests = new Map();
+  function snapshotRequest(params, scope = "year") {
+    if (!state.progressive) return api(`/api/snapshot?${queryParams(params)}`);
+    const url = `/api/dashboard?${queryParams({ ...params, scope })}`;
+    const fallback = () => api(url).then((data) => {
+      const prepared = RadarTimeline.prepare(data);
+      preparedSnapshots.set(prepared.snapshot, prepared);
+      return prepared.snapshot;
+    });
+    if (typeof Worker !== "undefined") {
+      try {
+      if (!dataWorker) {
+        dataWorker = new Worker("/static/data-worker.js?v=20261017-scrub");
+        const worker = dataWorker;
+        dataWorker.onmessage = ({ data }) => {
+          const request = workerRequests.get(data.id);
+          if (!request) return;
+          workerRequests.delete(data.id);
+          if (data.error) request.reject(new Error(data.error));
+          else { preparedSnapshots.set(data.result.snapshot, data.result); request.resolve(data.result.snapshot); }
+        };
+        dataWorker.onerror = () => {
+          if (dataWorker !== worker) return;
+          const failed = [...workerRequests.values()];
+          workerRequests.clear(); worker.terminate(); dataWorker = null;
+          for (const request of failed) request.fallback().then(request.resolve, request.reject);
+        };
+      }
+      return new Promise((resolve, reject) => { const id = ++workerSequence; workerRequests.set(id, { resolve, reject, fallback }); dataWorker.postMessage({ id, url }); });
+      } catch { /* Restricted browsers can still load and use the dashboard. */ }
+    }
+    return fallback();
+  }
+
+  function installDataset(snapshot, date = null) {
+    const prepared = preparedSnapshots.get(snapshot) ?? RadarTimeline.prepare(snapshot);
+    state.dataset = prepared.snapshot; state.timeline = prepared.timeline;
+    const wanted = state.restoreDate ?? date;
+    state.selectedDate = state.timeline.index.has(wanted) ? wanted : snapshot.as_of;
+    if (state.timeline.index.has(state.restoreDate)) state.restoreDate = null;
+    state.snapshot = selectedSnapshot(state.selectedDate) ?? snapshot;
+  }
+
+  function selectedSnapshot(date) {
+    return date === state.dataset.as_of ? { ...state.dataset, selection: { date, latest: date, historical: false } } : RadarTimeline.project(state.dataset, state.timeline, date);
+  }
+
+  function renderHistoryStatus() {
+    const node = $("historyLoadStatus");
+    if (!node) return;
+    node.textContent = state.historyLoading ? "完整历史后台加载中…" : state.historyError ? "完整历史加载失败，当前数据仍可使用" : state.historyReady ? "完整历史已缓存 · 拖动无需联网" : "近一年已就绪";
+    node.className = `history-load-status${state.historyError ? " error" : ""}`;
+    $("historyRetry").hidden = !state.historyError;
+  }
+
+  async function loadHistory(requestId = state.requestId) {
+    const epoch = ++state.historyEpoch;
+    state.historyLoading = true; state.historyError = null; renderHistoryStatus();
+    try {
+      const params = { ...state.params, start_date: [state.params.start_date, state.config.history_start_date ?? state.baseStart].filter(Boolean).sort()[0] };
+      const result = await snapshotRequest(params, "all");
+      if (requestId !== state.requestId || epoch !== state.historyEpoch) return;
+      const commit = () => {
+        if (requestId !== state.requestId || epoch !== state.historyEpoch) return;
+        installDataset(result.snapshot ?? result, state.snapshot?.selection?.historical ? state.selectedDate : null);
+        state.historyReady = true; state.historyLoading = false; state.pendingHistory = null;
+        renderAll(); renderViewChrome(); renderHistoryStatus(); setExportUrl();
+      };
+      // Do not replace the SVG while it owns pointer capture.
+      if (state.dragging) state.pendingHistory = commit;
+      else commit();
+    } catch (error) {
+      if (requestId !== state.requestId || epoch !== state.historyEpoch) return;
+      state.historyLoading = false; state.historyError = error.message; renderHistoryStatus();
+    }
+  }
+
+  function selectTradingDate(date, { persist = false } = {}) {
+    if (!state.timeline?.index.has(date)) return false;
+    if (!state.dragging) $("chartTooltip").hidden = true;
+    state.restoreDate = null;
+    if (state.selectedDate !== date) {
+      state.selectedDate = date;
+      state.snapshot = selectedSnapshot(date);
+      renderOverview(); renderTable(); renderAlerts(); renderEvidence(true);
+      if (state.selectedEtf) renderDrawer();
+      renderViewChrome(); setExportUrl();
+      presentDataWarnings();
+    }
+    state.chartController?.select(date);
+    renderDateSelection();
+    if (persist) persistView();
+    return true;
+  }
+
+  function renderDateSelection() {
+    const date = state.selectedDate ?? state.snapshot?.as_of;
+    $("selectedTradeDate").textContent = date || "—";
+    const series = state.chartController?.series ?? [];
+    const i = state.chartController?.dateIndex.get(date) ?? -1;
+    $("previousTradeDate").disabled = i <= 0;
+    $("nextTradeDate").disabled = i < 0 || i >= series.length - 1;
+    $("returnLatestDate").disabled = !state.dataset || date === state.dataset.as_of;
+    $("selectionContext").textContent = date && date !== state.dataset?.as_of ? "所选日联动 · 按当前披露版本回看" : "最新交易日 · 全页数据联动";
+  }
+
   function notify(message, kind = "info") {
     $("notice").className = `notice ${kind}`;
     $("noticeText").textContent = message;
@@ -64,9 +179,10 @@
 
   function setExportUrl() {
     const link = $("exportButton");
-    link.href = `/api/export.csv?${queryParams()}`;
+    const params = state.snapshot?.selection?.historical ? { ...state.params, review_date: state.snapshot.as_of } : state.params;
+    link.href = `/api/export.csv?${queryParams(params)}`;
     link.setAttribute("aria-disabled", state.snapshot ? "false" : "true");
-    link.title = state.snapshot ? `导出已展示的 ${state.params.start_date} 至 ${state.params.end_date}，使用当前监测参数` : "载入真实数据后可导出";
+    link.title = state.snapshot ? `导出 ${params.start_date} 至 ${params.review_date ?? params.end_date}，使用当前监测参数及披露数据版本` : "载入真实数据后可导出";
   }
 
   function readDateDraft() {
@@ -105,9 +221,9 @@
       if (query.has(key) && Number.isFinite(value) && value >= min && value <= max && (!["window", "sync_min"].includes(key) || Number.isInteger(value))) params[key] = value;
     }
     for (const key of ["start_date", "end_date"]) if (dateString(query.get(key))) params[key] = dateString(query.get(key));
-    const mode = ["complete", "latest", "custom"].includes(query.get("view")) ? query.get("view") : "complete";
-    const range = ["20", "60", "120", "252", "1260", "all"].includes(query.get("range")) ? query.get("range") : "all";
-    return { params, mode, range, indexVisible: query.get("index") !== "off" };
+    const mode = ["complete", "latest", "custom"].includes(query.get("view")) ? query.get("view") : "latest";
+    const range = ["20", "60", "120", "252", "1260", "all"].includes(query.get("range")) ? query.get("range") : "252";
+    return { params, mode, range, date: dateString(query.get("date")), indexVisible: query.get("index") !== "off" };
   }
 
   function persistView() {
@@ -117,15 +233,17 @@
     for (const key of Object.keys(DEFAULTS)) query.set(key, state.params[key]);
     if (state.params.start_date) query.set("start_date", state.params.start_date);
     if (state.mode === "custom" && state.params.end_date) query.set("end_date", state.params.end_date);
+    if (state.snapshot?.selection?.historical) query.set("date", state.selectedDate);
     window.history.replaceState(null, "", `${window.location.pathname}?${query}${window.location.hash}`);
   }
 
   function renderViewChrome() {
     const data = state.snapshot;
     const asOf = dateString(data?.as_of);
-    const label = state.mode === "complete" ? "最近完整交易日" : state.mode === "latest" ? "最新披露交易日" : "历史观察交易日";
+    const historical = data?.selection?.historical;
+    const label = historical ? "所选交易日" : state.mode === "complete" ? "最近完整交易日" : state.mode === "latest" ? "最新披露交易日" : "历史观察交易日";
     $("asOfLabel").textContent = label;
-    $("heroDateLabel").textContent = `${asOf || "—"} · 宽基组合`;
+    $("heroDateLabel").textContent = `${asOf || "—"} · 宽基组合${historical ? " · 历史回看" : ""}`;
     $("viewContext").innerHTML = state.loading ? `<span class="spinner"></span><span>正在读取${state.snapshot ? `，仍展示 ${esc(asOf)}` : "真实数据…"}</span>` : data ? `<span class="view-mode-label ${state.mode === "custom" ? "historical" : ""}">${esc(state.mode === "complete" ? "完整数据" : state.mode === "latest" ? "披露进度" : "历史视图")}</span><span>${esc(state.params.start_date)} 至 ${esc(state.params.end_date)}</span>${state.mode === "custom" ? '<button class="text-button" id="returnComplete">返回最近完整日 ↗</button>' : ""}` : "尚未载入真实数据";
     $("returnComplete")?.addEventListener("click", () => loadSnapshot({ mode: "complete" }));
     $("customDateEditor").hidden = !state.dateEditorOpen && state.mode !== "custom";
@@ -159,6 +277,10 @@
 
   async function loadSnapshot({ quiet = false, mode = state.mode, params = state.params } = {}) {
     const requestId = ++state.requestId;
+    state.historyEpoch += 1; state.pendingHistory = null;
+    const fullRefresh = quiet && state.historyReady && mode !== "custom";
+    const readScope = fullRefresh ? "all" : "year";
+    if (!quiet && state.dragging) state.chartController?.dispose();
     const candidate = { ...params };
     let draft = null;
     state.loading = true;
@@ -168,15 +290,15 @@
     try {
       let selected; let newest = state.latestSnapshot; let displayParams = candidate;
       if (mode === "custom") {
-        const result = await api(`/api/snapshot?${queryParams(candidate)}`);
+        const result = await snapshotRequest(candidate, "custom");
         selected = result.snapshot ?? result;
         // Disclosure progress has its own date and never borrows the historical view.
         if (!newest) {
-          try { const latest = await api(`/api/snapshot?${queryParams(latestParams(candidate))}`); newest = latest.snapshot ?? latest; } catch { /* Historical data remains useful if latest coverage is unavailable. */ }
+          try { const latest = await snapshotRequest(latestParams(candidate), readScope); newest = latest.snapshot ?? latest; } catch { /* Historical data remains useful if latest coverage is unavailable. */ }
         }
       } else {
         const newestQuery = latestParams(candidate);
-        const result = await api(`/api/snapshot?${queryParams(newestQuery)}`);
+        const result = await snapshotRequest(newestQuery, readScope);
         newest = result.snapshot ?? result;
         displayParams = { ...newestQuery };
         selected = newest;
@@ -187,14 +309,17 @@
           if (!completeDate || completeDate >= dateString(selected.as_of)) break;
           displayParams.end_date = completeDate;
           if (displayParams.start_date > completeDate) displayParams.start_date = completeDate;
-          const complete = await api(`/api/snapshot?${queryParams(displayParams)}`);
+          const complete = await snapshotRequest(displayParams, readScope);
           selected = complete.snapshot ?? complete;
         }
         if (mode === "complete" && !selected.summary?.complete) throw new Error("当前无法形成完整组合，请切换到最新披露查看数据缺口。");
       }
+      if (quiet && state.dragging) await new Promise((resolve) => state.dragWaiters.push(resolve));
       if (requestId !== state.requestId) return;
       if (quiet) draft = { start: $("startDate").value, end: $("endDate").value, editorOpen: state.dateEditorOpen, dirty: state.dateDraftDirty };
-      state.snapshot = selected;
+      installDataset(selected, quiet && state.snapshot?.selection?.historical ? state.selectedDate : null);
+      state.historyReady = fullRefresh || !state.progressive || mode === "custom";
+      state.historyLoading = false; state.historyError = null;
       state.latestSnapshot = newest;
       state.mode = mode;
       state.params = { ...displayParams };
@@ -206,10 +331,17 @@
       syncDateInputs(state.snapshot);
       if (draft?.dirty) { $("startDate").value = draft.start; $("endDate").value = draft.end; }
       renderAll(); renderViewChrome(); persistView();
+      renderHistoryStatus();
       $("dateDraftNote").textContent = draft?.dirty ? "日期尚未应用；当前图表和导出保持原区间。" : "图表、基金明细与导出使用同一已展示区间。";
       $("connectionDot").className = "connection-dot connected";
       $("connectionLabel").textContent = "Tushare · 本地数据";
       presentDataWarnings();
+      if (state.progressive && !fullRefresh) {
+        // Paint the usable recent view before requesting the full history.
+        const background = () => { if (requestId === state.requestId) loadHistory(requestId); };
+        if (typeof requestIdleCallback === "function") requestIdleCallback(background, { timeout: 800 });
+        else setTimeout(background, 0);
+      }
       return true;
     } catch (error) {
       if (requestId !== state.requestId) return;
@@ -279,7 +411,7 @@
           // Refresh current mode; a custom historical end date is never replaced.
           if (mode === "custom") {
             try {
-              const latest = await api(`/api/snapshot?${queryParams(latestParams(params))}`);
+              const latest = await snapshotRequest(latestParams(params));
               if (state.requestId === viewRequestId && !state.loading) state.latestSnapshot = latest.snapshot ?? latest;
             } catch { /* Keep last known disclosure progress. */ }
           }
@@ -313,6 +445,7 @@
     renderEvidence();
     renderMethod();
     if (state.selectedEtf) renderDrawer();
+    renderDateSelection();
   }
 
   function renderOverview() {
@@ -388,17 +521,28 @@
   function formatUpdatedAt(value) {
     const str = String(value);
     const date = new Date(str);
-    if (!Number.isNaN(date.getTime()) && /[TZ+]/.test(str)) return `${new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date)} 更新`;
+    if (!Number.isNaN(date.getTime()) && /[TZ+]/.test(str)) return `${updatedFormat.format(date)} 更新`;
     return `${str.replace("T", " ").slice(5, 16)} 更新`;
   }
 
   function renderMainChart() {
-    let series = array(state.snapshot?.series);
-    if (state.range !== "all") series = series.slice(-Number(state.range));
+    state.chartController?.dispose(); state.chartController = null;
+    let series = array((state.dataset ?? state.snapshot)?.series);
+    if (state.mode === "custom") series = series.filter((row) => row.date >= state.params.start_date);
+    if (["252", "1260"].includes(state.range) && series.length) {
+      const end = new Date(`${series.at(-1).date}T00:00:00Z`);
+      const month = end.getUTCMonth(); const years = state.range === "252" ? 1 : 5;
+      end.setUTCFullYear(end.getUTCFullYear() - years);
+      if (end.getUTCMonth() !== month) end.setUTCDate(0);
+      const cutoff = end.toISOString().slice(0, 10);
+      series = series.filter((row) => row.date > cutoff);
+    } else if (state.range !== "all") series = series.slice(-Number(state.range));
+    // Return to the latest date if a shorter range excludes the old cursor.
+    if (state.selectedDate && !series.some((row) => row.date === state.selectedDate) && series.length) selectTradingDate(series.at(-1).date);
     $("chartDays").textContent = `${series.length} 个交易日`;
-    const history = state.snapshot?.metadata?.history;
+    const history = (state.dataset ?? state.snapshot)?.metadata?.history;
     if ($("historySummary") && history) $("historySummary").textContent = `共同上市起点 ${history.common_listing_date} · 当前区间 ${history.complete_days} / ${history.trading_days} 日资金数据完整 · Z基准就绪 ${history.first_z_date ?? "尚待完整样本"}`;
-    const benchmark = new Map(array(state.snapshot?.metadata?.benchmark)
+    const benchmark = new Map(array((state.dataset ?? state.snapshot)?.metadata?.benchmark)
       .filter((row) => dateString(row.trade_date) && finite(row.close) && Number(row.close) > 0)
       .map((row) => [dateString(row.trade_date), row]));
     const indexRows = series.map((row) => benchmark.get(dateString(row.date ?? row.trade_date)) ?? null);
@@ -412,6 +556,7 @@
     $("mainChart").setAttribute("aria-label", `每日估算净申赎${showIndex ? "、沪深300指数" : ""}及 Z 异常度图表`);
     $("chartFootText").innerHTML = `<i class="foot-dot"></i>${showIndex ? "左轴为估算净申赎（亿元），右轴为沪深300（点）；" : indexAvailable ? "估算净申赎（亿元）；沪深300指数曲线已关闭。" : "估算净申赎（亿元）；当前区间暂无沪深300指数数据。"}底部为 Z 异常度，缺失值留空。`;
     drawChart($("mainChart"), series, { z: true, field: "flow_yi", indexRows: showIndex ? indexRows : null });
+    renderDateSelection();
   }
 
   function niceMax(value) {
@@ -513,17 +658,31 @@
       if (!labelled.has(i)) svg += `<text class="x-label" x="${x(i)}" y="${height - 9}" text-anchor="middle">${esc(shortDate(series[i].date ?? series[i].trade_date))}</text>`;
       labelled.add(i);
     }
-    svg += `<line class="hover-guide" x1="0" x2="0" y1="${margin.top}" y2="${zBottom}"/>`;
-    series.forEach((row, i) => { svg += `<rect class="hit-zone" data-index="${i}" x="${margin.left + i * step}" y="${margin.top}" width="${step}" height="${zBottom - margin.top}"/>`; });
+    svg += `<g class="pulse-cursor"><line class="cursor-line" x1="0" x2="0" y1="${margin.top}" y2="${zBottom}"/><circle class="cursor-handle" cx="0" cy="${zBottom}" r="5"/></g>`;
+    svg += `<rect class="pulse-hit-area" x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${zBottom - margin.top + 8}"/>`;
     svg += "</svg>";
     container.innerHTML = svg;
-    const guide = container.querySelector(".hover-guide");
-    container.querySelectorAll(".hit-zone").forEach((zone) => {
-      const show = (event) => {
-        const index = Number(zone.dataset.index);
+    bindPulseCursor(container, series, { width, margin, step, x, hasIndex, indexRows });
+  }
+
+  function bindPulseCursor(container, series, { width, margin, step, x, hasIndex, indexRows }) {
+    const guide = container.querySelector(".pulse-cursor");
+    const dateIndex = new Map(series.map((row, i) => [dateString(row.date ?? row.trade_date), i]));
+    let frame = null; let pending = null; let bounds = null; let tooltipIndex = -1;
+    let pointerId = null;
+    const tooltip = $("chartTooltip");
+    const select = (date) => {
+      const i = dateIndex.get(date);
+      if (i === undefined) return;
+      guide.setAttribute("transform", `translate(${x(i)},0)`);
+      container.setAttribute("aria-valuenow", i);
+      container.setAttribute("aria-valuetext", `${date}，估算净申赎 ${number(series[i].flow_yi)} 亿元`);
+    };
+    const show = ({ index, clientX, clientY, selecting }) => {
         const row = series[index];
-        guide.setAttribute("x1", x(index)); guide.setAttribute("x2", x(index)); guide.style.display = "block";
+        if (selecting) selectTradingDate(dateString(row.date ?? row.trade_date));
         const title = dateString(row.date ?? row.trade_date) || "日期未知";
+        if (tooltipIndex !== index) {
         let content = `<div class="tooltip-date">${esc(title)}</div><div class="tooltip-row"><span>估算净申赎</span><strong class="${colorClass(row.flow_yi)}">${number(row.flow_yi, 2, true)} 亿元</strong></div>`;
         if (hasIndex) {
           const indexRow = indexRows[index];
@@ -534,21 +693,87 @@
         content += `<div class="tooltip-row"><span>Z 异常度</span><strong>${number(row.z_score, 2, true)}</strong></div>`;
         if (finite(row.valid_count)) content += `<div class="tooltip-row"><span>有效 ETF</span><strong>${number(row.valid_count, 0)} / ${state.snapshot?.summary?.total_count ?? "—"}</strong></div>`;
         if (!finite(row.z_score)) content += '<div class="tooltip-small">Z 值未知：历史不足、数据缺失或零方差。</div>';
-        const tooltip = $("chartTooltip"); tooltip.innerHTML = content; tooltip.hidden = false;
-        const tooltipRect = tooltip.getBoundingClientRect();
-        const clientX = event.clientX ?? (container.getBoundingClientRect().left + x(index));
-        const clientY = event.clientY ?? container.getBoundingClientRect().top;
-        tooltip.style.left = `${Math.max(8, Math.min(window.innerWidth - tooltipRect.width - 10, clientX + 15))}px`;
-        tooltip.style.top = `${Math.max(8, Math.min(window.innerHeight - tooltipRect.height - 10, clientY - tooltipRect.height - 12))}px`;
-      };
-      zone.addEventListener("pointermove", show);
-      zone.addEventListener("pointerdown", show);
-    });
-    container.onpointerleave = () => { $("chartTooltip").hidden = true; if (guide) guide.style.display = "none"; };
+        tooltip.innerHTML = content; tooltipIndex = index;
+        }
+        tooltip.hidden = false;
+        // A fixed-size tooltip avoids layout reads inside the drag loop.
+        tooltip.style.left = `${Math.max(8, Math.min(window.innerWidth - 244, clientX + 15))}px`;
+        tooltip.style.top = `${Math.max(8, Math.min(window.innerHeight - 230, clientY - 220))}px`;
+    };
+    const flush = () => {
+      frame = null; state.cursorFrame = null;
+      if (pending) { const update = pending; pending = null; show(update); }
+    };
+    const schedule = (event, selecting) => {
+      if (!bounds) bounds = container.getBoundingClientRect();
+      const px = ((event.clientX ?? bounds.left) - bounds.left) * width / (bounds.width || width);
+      const index = Math.max(0, Math.min(series.length - 1, Math.floor((px - margin.left) / step)));
+      pending = { index, clientX: event.clientX ?? bounds.left + x(index), clientY: event.clientY ?? bounds.top, selecting };
+      if (frame === null) { frame = requestAnimationFrame(flush); state.cursorFrame = frame; }
+    };
+    const finish = (event) => {
+      if (pointerId === null || (event.pointerId !== undefined && event.pointerId !== pointerId)) return;
+      if (frame !== null) { cancelAnimationFrame(frame); flush(); }
+      const captured = pointerId; pointerId = null; state.dragging = false;
+      if (container.hasPointerCapture?.(captured)) container.releasePointerCapture(captured);
+      container.classList.remove("scrubbing"); tooltip.hidden = true; bounds = null;
+      persistView();
+      state.dragWaiters.splice(0).forEach((resolve) => resolve());
+      if (state.pendingHistory) state.pendingHistory();
+    };
+    const controller = {
+      series, dateIndex, select,
+      dispose() {
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null; pending = null; state.cursorFrame = null;
+        if (pointerId !== null) {
+          const captured = pointerId; pointerId = null;
+          if (container.hasPointerCapture?.(captured)) container.releasePointerCapture(captured);
+        }
+        state.dragging = false; tooltip.hidden = true;
+        state.dragWaiters.splice(0).forEach((resolve) => resolve());
+        for (const name of ["onpointerdown", "onpointermove", "onpointerup", "onpointercancel", "onlostpointercapture", "onpointerleave", "onkeydown"]) container[name] = null;
+        container.setAttribute("aria-disabled", "true");
+      },
+    };
+    state.chartController = controller;
+    container.setAttribute("role", "slider"); container.setAttribute("tabindex", "0");
+    container.setAttribute("aria-disabled", "false");
+    container.setAttribute("aria-label", "交易日选择，拖动竖线或用左右方向键联动全页数据");
+    container.setAttribute("aria-valuemin", "0"); container.setAttribute("aria-valuemax", series.length - 1);
+    select(state.selectedDate ?? dateString(series.at(-1).date ?? series.at(-1).trade_date));
+    container.onpointerdown = (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      if (pointerId !== null || state.loading) return;
+      bounds = container.getBoundingClientRect(); pointerId = event.pointerId ?? 1;
+      state.dragging = true; container.classList.add("scrubbing");
+      container.setPointerCapture?.(pointerId);
+      container.focus({ preventScroll: true }); schedule(event, true);
+    };
+    container.onpointermove = (event) => {
+      if (pointerId !== null && event.pointerId !== undefined && event.pointerId !== pointerId) return;
+      if (event.pointerType === "touch" && pointerId === null) return;
+      schedule(event, pointerId !== null);
+    };
+    container.onpointerup = finish;
+    container.onpointercancel = finish;
+    container.onlostpointercapture = finish;
+    container.onpointerleave = () => {
+      if (pointerId !== null) return;
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null; state.cursorFrame = null; pending = null; bounds = null; tooltip.hidden = true;
+    };
+    container.onkeydown = (event) => {
+      const i = dateIndex.get(state.selectedDate) ?? series.length - 1;
+      const next = { ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: series.length - 1 }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      selectTradingDate(dateString(series[Math.max(0, Math.min(series.length - 1, next))].date), { persist: true });
+    };
   }
 
   function drawChart(container, series, { z = false, field = "flow_yi", shares = false, indexRows = null } = {}) {
-    if (z) { drawPulseChart(container, series, indexRows); return; }
+    if (z && container === $("mainChart")) { drawPulseChart(container, series, indexRows); return; }
     if (!series.length) { container.innerHTML = chartEmpty("该区间暂无数据", "调整日期区间或更新真实数据后查看"); return; }
     const width = Math.max(container.clientWidth || 800, 280);
     const height = container.clientHeight || 280;
@@ -565,7 +790,7 @@
     const y = (value) => margin.top + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
     const step = plotWidth / series.length;
     const x = (i) => margin.left + step * (i + .5);
-    const barWidth = Math.max(1.3, Math.min(18, step * .64));
+    const barWidth = Math.max(.05, Math.min(18, step * .64));
     const zs = series.map((row) => num(row.z_score)).filter((v) => v !== null);
     const maxZ = niceMax(Math.max(state.params.z_threshold * 1.7, ...zs.map(Math.abs), 3));
     const zy = (value) => margin.top + (1 - (value + maxZ) / (maxZ * 2)) * plotHeight;
@@ -654,7 +879,8 @@
 
   function etfSeries(code) {
     const entries = state.snapshot?.etf_series ?? {};
-    return array(entries[code] ?? entries[code.split(".")[0]]);
+    const rows = array(entries[code] ?? entries[code.split(".")[0]]);
+    return state.selectedDate ? rows.slice(0, RadarTimeline.upperBound(rows, state.selectedDate)) : rows;
   }
 
   function renderTableFilters() {
@@ -697,6 +923,9 @@
   function renderAlerts() {
     const confirmed = array(state.snapshot?.alerts);
     const observations = array(state.snapshot?.observation_events).map((entry) => ({ ...entry, kind: "synchrony_observation" }));
+    const signature = `${confirmed.length}/${observations.length}/${state.alertsExpanded}`;
+    if (renderAlerts.dataset === state.dataset && renderAlerts.signature === signature) return;
+    renderAlerts.dataset = state.dataset; renderAlerts.signature = signature;
     const alerts = [...confirmed, ...observations].sort((a, b) => String(b.date).localeCompare(String(a.date)));
     $("alertCount").textContent = `${confirmed.length} 异动${observations.length ? ` · ${observations.length} 观察` : ""}`;
     $("showAllAlerts").hidden = alerts.length <= 4;
@@ -709,28 +938,33 @@
     }).join("");
   }
 
-  function renderEvidence() {
+  function renderEvidence(selectionOnly = false) {
     const data = state.snapshot ?? {};
     const evidence = array(data.evidence);
     const monitoring = data.monitoring ?? {};
     const sources = Object.values(monitoring.official_sources ?? {});
     const healthy = sources.filter((s) => s.state === "ok").length;
     $("evidenceStatus").querySelector("p").textContent = sources.length ? `官方公告源 ${healthy} / ${sources.length} 本次可访问 · ${evidence.length} 条截止日前披露。公告不分配当日 ETF 交易额。` : "公告采集尚未运行；未抓取不等于没有增持。";
-    $("evidenceList").innerHTML = evidence.slice(0, 5).map((entry) => {
+    const evidenceHtml = evidence.slice(0, 5).map((entry) => {
       const url = safeUrl(entry.url);
       const title = esc(entry.title ?? "公开披露");
       const official = entry.verification === "official_source";
       const details = [entry.excerpt, entry.first_seen_at ? `首次采集：${entry.first_seen_at}；历史回看仅按公告日过滤` : entry.verification].filter(Boolean).join("\n");
       return `<div class="evidence-item" title="${esc(details)}"><span class="evidence-type">${esc(official ? entry.source_name ?? "官方" : "人工")}</span>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title} ↗</a>` : `<span>${title}</span>`}<time title="公告发布日期">${esc(dateString(entry.date))}</time></div>`;
     }).join("");
+    if ($("evidenceList").innerHTML !== evidenceHtml) $("evidenceList").innerHTML = evidenceHtml;
     const coverageNode = $("monitoringCoverage");
     const labels = { ok: "已接入", connected: "自动采集", implemented: "已实现", partial: "部分可用", unavailable: "暂不可用", not_fetched: "尚未获取", stale_cache: "旧缓存", not_implemented: "未实现" };
-    if (coverageNode) coverageNode.innerHTML = `<h3>监测手段覆盖</h3><p>状态按真实采集结果更新；辅助线索不自动加分。</p>${array(monitoring.channels).map((c) => `<div class="coverage-method"><div><strong>${esc(c.name)}</strong><span class="coverage-state ${["ok", "connected", "implemented"].includes(c.state) ? "ok" : "warn"}">${esc(labels[c.state] ?? c.state)}</span></div><p>${esc(c.scope ?? "")}</p></div>`).join("")}<details class="source-status"><summary>官方源状态与采集时间</summary>${sources.map((s) => `<p><strong>${esc(s.name)}</strong> · ${esc(labels[s.state] ?? s.state)}<br>${esc(s.checked_at ?? "尚未采集")}${s.error ? ` · ${esc(s.error)}` : ""}</p>`).join("")}</details>`;
+    if (coverageNode && !selectionOnly) coverageNode.innerHTML = `<h3>监测手段覆盖</h3><p>状态按真实采集结果更新；辅助线索不自动加分。</p>${array(monitoring.channels).map((c) => `<div class="coverage-method"><div><strong>${esc(c.name)}</strong><span class="coverage-state ${["ok", "connected", "implemented"].includes(c.state) ? "ok" : "warn"}">${esc(labels[c.state] ?? c.state)}</span></div><p>${esc(c.scope ?? "")}</p></div>`).join("")}<details class="source-status"><summary>官方源状态与采集时间</summary>${sources.map((s) => `<p><strong>${esc(s.name)}</strong> · ${esc(labels[s.state] ?? s.state)}<br>${esc(s.checked_at ?? "尚未采集")}${s.error ? ` · ${esc(s.error)}` : ""}</p>`).join("")}</details>`;
     const crossNode = $("crosscheckObservations");
-    if (crossNode) crossNode.innerHTML = Object.entries(data.crosschecks?.channels ?? {}).map(([key, channel]) => {
+    if (crossNode) {
+    const opened = new Set([...crossNode.querySelectorAll("details[open]")].map((node) => node.dataset.channel));
+    const html = Object.entries(data.crosschecks?.channels ?? {}).map(([key, channel]) => {
       const detail = (row) => key === "holders" ? `${row.holder_name} · 报告期 ${row.report_period} · ${number(finite(row.hold_amount_shares) ? row.hold_amount_shares / 1e8 : null)} 亿股` : key === "dragon_tiger" ? `${row.seat} · 席位净额 ${number(finite(row.net_buy_yuan) ? row.net_buy_yuan / 1e8 : null, 2, true)} 亿元` : key === "block_trades" ? `成交 ${number(row.amount_yi)} 亿元 · 每笔含买卖双方` : `超大单主动买卖差额 ${number(row.elg_active_difference_yi, 2, true)} 亿元`;
-      return `<details class="crosscheck-channel"><summary>${esc(channel.name)} <span>${esc(labels[channel.state] ?? channel.state)} · ${number(channel.total_records ?? 0, 0)} 条</span></summary><p>${esc(channel.limit)}</p>${array(channel.rows).slice(0, 5).map((row) => `<div class="crosscheck-row"><time>${esc(row.date)}</time><strong>${esc(row.ts_code)}</strong><span>${esc(detail(row))}</span></div>`).join("") || '<p>当前没有可展示记录。来源不可用时不按0处理。</p>'}${array(channel.errors).length ? `<p class="crosscheck-error">${channel.errors.map(esc).join("；")}</p>` : ""}</details>`;
+      return `<details class="crosscheck-channel" data-channel="${esc(key)}"${opened.has(key) ? " open" : ""}><summary>${esc(channel.name)} <span>${esc(labels[channel.state] ?? channel.state)} · ${number(channel.total_records ?? 0, 0)} 条</span></summary><p>${esc(channel.limit)}${channel.review_cutoff ? " · 已采集记录按所选交易日截止，不代表更早历史已完整采集。" : ""}</p>${array(channel.rows).slice(0, 5).map((row) => `<div class="crosscheck-row"><time>${esc(row.date)}</time><strong>${esc(row.ts_code)}</strong><span>${esc(detail(row))}</span></div>`).join("") || '<p>当前没有可展示记录。来源不可用时不按0处理。</p>'}${array(channel.errors).length ? `<p class="crosscheck-error">${channel.errors.map(esc).join("；")}</p>` : ""}</details>`;
     }).join("");
+    if (crossNode.innerHTML !== html) crossNode.innerHTML = html;
+    }
     const quality = data.quality ?? {};
     const meta = data.metadata ?? {};
     let warnings = [...array(quality.warnings), ...array(meta.warnings), ...array(meta.errors)].map((value) => typeof value === "object" ? (value.message ?? JSON.stringify(value)) : String(value)).filter(Boolean);
@@ -786,7 +1020,7 @@
     const etf = array(state.snapshot?.etfs).find((entry) => codeOf(entry) === state.selectedEtf);
     if (!etf) { closeDrawer(); return; }
     const info = signalInfo(etf.status, etf);
-    const series = etfSeries(state.selectedEtf);
+    const series = etfSeries(state.selectedEtf).slice(-252);
     const recent = series.slice(-10).reverse();
     const metadata = state.snapshot.metadata?.symbols?.[state.selectedEtf] ?? {};
     const warnings = [...new Set([...(Array.isArray(etf.quality) ? etf.quality : etf.quality ? [etf.quality] : []), ...array(metadata.warnings), ...array(metadata.errors)])];
@@ -798,6 +1032,15 @@
   function viewDate(value) {
     const date = dateString(value);
     if (!date) return;
+    if (state.timeline?.index.has(date)) {
+      const visible = state.chartController?.dateIndex.has(date);
+      if (!visible) {
+        state.range = "all"; syncRangeControls(); renderMainChart();
+      }
+      selectTradingDate(date, { persist: true });
+      $("overview").scrollIntoView({ behavior: "smooth" });
+      return;
+    }
     if ($("startDate").value && $("startDate").value > date) $("startDate").value = date;
     $("endDate").value = date;
     const params = readDateDraft();
@@ -816,6 +1059,10 @@
   }
 
   function closeSettings() { $("settingsDialog").close(); if (!state.selectedEtf) document.body.classList.remove("modal-open"); }
+
+  function syncRangeControls() {
+    $("rangeControls").querySelectorAll("button").forEach((button) => { const active = button.dataset.range === state.range; button.classList.toggle("active", active); button.setAttribute("aria-pressed", active ? "true" : "false"); });
+  }
 
   function bindEvents() {
     const submitDates = () => { const params = readDateDraft(); if (params) loadSnapshot({ mode: "custom", params }); };
@@ -846,9 +1093,17 @@
     $("rangeControls").addEventListener("click", (event) => {
       const button = event.target.closest("[data-range]"); if (!button) return;
       state.range = button.dataset.range;
-      $("rangeControls").querySelectorAll("button").forEach((item) => { item.classList.toggle("active", item === button); item.setAttribute("aria-pressed", item === button ? "true" : "false"); });
+      syncRangeControls();
       renderMainChart(); if (state.snapshot) persistView();
     });
+    for (const [id, delta] of [["previousTradeDate", -1], ["nextTradeDate", 1]]) $(id).addEventListener("click", () => {
+      const controller = state.chartController;
+      const i = controller?.dateIndex.get(state.selectedDate);
+      const row = controller?.series[(i ?? -1) + delta];
+      if (row) selectTradingDate(row.date, { persist: true });
+    });
+    $("returnLatestDate").addEventListener("click", () => selectTradingDate(state.dataset?.as_of, { persist: true }));
+    $("historyRetry").addEventListener("click", () => loadHistory());
     $("indexToggle").addEventListener("click", () => {
       if ($("indexToggle").disabled) return;
       state.indexVisible = !state.indexVisible;
@@ -879,6 +1134,7 @@
   }
 
   async function init() {
+    state.progressive = true;
     bindEvents();
     // Unknown values remain unknown: the UI never manufactures market observations.
     try {
@@ -890,10 +1146,11 @@
     const saved = readUrlState();
     state.params = { ...state.params, ...saved.params };
     state.mode = saved.mode; state.range = saved.range; state.indexVisible = saved.indexVisible;
+    state.restoreDate = saved.date || null;
     state.baseStart = saved.params.start_date ?? state.config.start_date;
     syncDateInputs();
     if (state.config.today) $("endDate").max = state.config.today;
-    $("rangeControls").querySelectorAll("button").forEach((button) => { const active = button.dataset.range === state.range; button.classList.toggle("active", active); button.setAttribute("aria-pressed", active ? "true" : "false"); });
+    syncRangeControls();
     await loadSnapshot();
     await pollStatus();
   }

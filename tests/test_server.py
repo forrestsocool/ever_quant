@@ -101,6 +101,67 @@ def test_json_never_emits_non_finite_values(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8")) == {"flow": None, "z": None}
 
 
+def test_progressive_dashboard_wire_format_cache_and_validation(configured, monkeypatch):
+    store, days = configured
+    calls = []
+    original = store.snapshot
+    def tracked(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(store, "snapshot", tracked)
+    with TestClient(server.create_app(store, auto_update=False, initial_refresh=False)) as client:
+        response = client.get("/api/dashboard?scope=year")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["transport"] == {"format": "columns-v1", "scope": "year", "review_policy": "历史联动按当前披露的数据版本回看；不重建当时可见数据。"}
+        assert response.headers["content-encoding"] == "gzip"
+        unpacked = [dict(zip(data["series"]["columns"], row)) for row in data["series"]["rows"]]
+        assert unpacked[-1]["date"] == days[-1]
+        assert len(data["etf_series"]) == 7
+        assert data["as_of"] == days[-1]
+        assert client.get("/api/dashboard?scope=year").content == response.content
+        assert len(calls) == 1
+        store.state["completed_at"] = "new-revision"
+        assert client.get("/api/dashboard?scope=year").status_code == 200
+        assert len(calls) == 2
+        assert client.get("/api/dashboard?scope=all").status_code == 200
+        assert len(calls) == 3
+        assert client.get("/api/dashboard?scope=invalid").status_code == 422
+        assert client.get("/api/dashboard?window=1").status_code == 422
+
+
+def test_recent_analysis_matches_full_history_with_maximum_warmup(configured):
+    store, _ = configured
+    days = pd.bdate_range("2023-01-02", "2026-09-01").strftime("%Y-%m-%d").tolist()
+    rows = [{"trade_date": day, "ts_code": etf["ts_code"], "total_share": 2_000_000 + i * 100 + (i % 7) * 100, "nav": 4}
+            for etf in server.ETF_UNIVERSE for i, day in enumerate(days)]
+    store.data = {"observations": pd.DataFrame(rows), "calendar": days, "metadata": {}}
+    full = store.snapshot({"window": 120}, days[0], days[-1])
+    recent = store.snapshot({"window": 120}, "2025-07-01", days[-1])
+    assert recent["summary"] == full["summary"]
+    assert recent["series"] == [row for row in full["series"] if row["date"] >= "2025-07-01"]
+    for code in recent["etf_series"]:
+        assert recent["etf_series"][code] == [row for row in full["etf_series"][code] if row["date"] >= "2025-07-01"]
+
+
+def test_review_export_matches_current_version_cursor_not_historical_nav_cutoff(configured):
+    store, days = configured
+    frame = store.data["observations"]
+    frame["nav_ann_date"] = frame["trade_date"]
+    frame.loc[frame["trade_date"] == days[39], "nav_ann_date"] = days[42]
+    with TestClient(server.create_app(store, auto_update=False, initial_refresh=False)) as client:
+        query = f"start_date={days[0]}&end_date={days[-1]}&review_date={days[40]}"
+        response = client.get(f"/api/export.csv?{query}")
+        assert response.status_code == 200
+        exported = list(csv.DictReader(io.StringIO(response.text.lstrip("\ufeff"))))
+        assert max(row["date"] for row in exported) == days[40]
+        expected = store.snapshot()["etf_series"]["510300.SH"][40]["flow_yi"]
+        row = next(row for row in exported if row["ts_code"] == "510300.SH" and row["date"] == days[40])
+        assert float(row["flow_yi"]) == expected
+        assert store.snapshot(end=days[40])["summary"]["flow_yi"] is None
+        assert client.get(f"/api/export.csv?{query}&review_date=invalid").status_code == 422
+
+
 def test_historical_cutoff_masks_unannounced_nav_and_nested_benchmark(configured):
     store, days = configured
     frame = store.data["observations"]
